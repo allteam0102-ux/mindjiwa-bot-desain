@@ -690,8 +690,11 @@ def process_page(page, workdir):
     fmt = read_property(props, FORMAT_PROPERTY, "select") or "Single Post"
     content = read_property(props, CONTENT_PROPERTY, "rich_text")
     keywords = read_property(props, KEYWORD_PROPERTY, "rich_text")
-    theme = read_property(props, THEME_PROPERTY, "select") or DEFAULT_THEME
+    theme = (read_property(props, THEME_PROPERTY, "select")
+             or read_property(props, THEME_PROPERTY, "status")
+             or DEFAULT_THEME)
     st = style_of(theme)
+    print(f"  [tema dibaca: '{theme}' -> style: {st['kind']}]")
 
     if not content.strip():
         raise ValueError("Kolom 'Konten' kosong.")
