@@ -1,20 +1,26 @@
 # -*- coding: utf-8 -*-
 """
-MINDJIWA BOT DESAIN  (gaya @mindjiwa.id — stabilo hijau)
-========================================================
-Alur: Notion (Status "Siap Desain") -> ambil gambar -> rakit desain gaya
-mindjiwa -> kirim ke Telegram. Menghasilkan .pptx (Canva) + .svg (Figma).
+MINDJIWA BOT DESAIN  (gaya @mindjiwa.id — multi-style, stabilo hijau)
+====================================================================
+Notion (Status "Siap Desain") -> gambar -> rakit desain -> Telegram.
+Output: .pptx (Canva) + .svg (Figma).
 
-Sumber gambar:
+GAMBAR:
   - CAROUSEL     : otomatis dari Pexels (kata kunci per slide)
-  - SINGLE POST  : dari link yang kamu tempel (Pinterest) -> diubah jadi
-                   efek SKETSA PENSIL otomatis (filter gratis, bukan AI).
-    (Kalau slide Single Post tidak diberi link, robot ambil dari Pexels lalu
-     tetap dijadikan sketsa pensil.)
+  - SINGLE POST  : dari link yang kamu tempel -> jadi SKETSA PENSIL (filter gratis)
+  - (link boleh ditaruh langsung di dalam Konten, baris sendiri)
 
-Tema per konten (kolom 'Tema'):
-  - Krem  (default): background krem, foto di frame atas, teks di bawah
-  - Gelap          : foto full, teks di bawah dengan overlay gelap
+TEMA / STYLE (kolom 'Tema'):
+  - Krem     : bg krem, foto di frame atas, teks di bawah
+  - Gelap    : foto full, teks di bawah (overlay gelap)
+  - Kertas   : bg krem, TANPA foto, teks di tengah, headline serif (gaya "Manifesting")
+  - Kutipan  : foto gelap + tanda kutip hijau besar + teks putih
+
+PENANDA TEKS (berlaku semua style):
+  ==kata==   -> stabilo hijau
+  _kata_     -> miring (italic)
+  ((kata))   -> dilingkari hijau
+  ~kata~     -> garis bawah hijau
 """
 
 import os
@@ -28,7 +34,7 @@ import tempfile
 import traceback
 
 import requests
-from PIL import Image, ImageDraw, ImageOps, ImageFilter, ImageChops
+from PIL import Image, ImageOps, ImageFilter
 from pptx import Presentation
 from pptx.util import Emu, Pt
 from pptx.dml.color import RGBColor
@@ -50,8 +56,9 @@ HASHTAG       = os.environ.get("HASHTAG")       or "#TempatmuJedaDanBercerita"
 FOOTER_TEXT   = os.environ.get("FOOTER_TEXT")   or "Curhat dan Konseling\nOnline & Offline"
 ACCENT_COLOR  = (os.environ.get("ACCENT_COLOR") or "A6CE39").lstrip("#")    # hijau stabilo
 CREAM_COLOR   = (os.environ.get("CREAM_COLOR")  or "F3F1E7").lstrip("#")    # krem
-LOGO_URL      = os.environ.get("LOGO_URL")      or ""                        # logo mindjiwa (PNG)
+LOGO_URL      = os.environ.get("LOGO_URL")      or ""
 HEADLINE_FONT = os.environ.get("HEADLINE_FONT") or "Poppins"
+SERIF_FONT    = os.environ.get("SERIF_FONT")    or "Playfair Display"
 BODY_FONT     = os.environ.get("BODY_FONT")     or "Poppins"
 ARROW_TEXT    = os.environ.get("ARROW_TEXT")    or "→"
 STYLE_HINT    = os.environ.get("STYLE_HINT")    or "aesthetic lifestyle candid natural light"
@@ -99,7 +106,7 @@ def hex_rgb(h):
 
 ACCENT = hex_rgb(ACCENT_COLOR)
 WHITE  = RGBColor(0xFF, 0xFF, 0xFF)
-INK    = "1A1A1A"    # teks gelap
+INK    = "1A1A1A"
 
 EMU_W = CANVAS_W * 9525
 EMU_H = CANVAS_H * 9525
@@ -202,25 +209,39 @@ def keyword_for(index, keyword_blocks, headline, body):
         q = body
     else:
         q = "aesthetic minimal"
-    q = re.sub(r"==", "", q)
+    q = re.sub(r"[=~()_]", "", q)
     words = re.sub(r"[^\w\s]", " ", q).split()
     return " ".join(words[:4]) if words else "aesthetic minimal"
 
 def rich_words(line):
-    """Pecah 1 baris jadi kata + tanda highlight (==..==) & italic (_.._)."""
-    out = []
-    for part in re.split(r"(==.+?==)", line):
-        is_hl = len(part) >= 4 and part.startswith("==") and part.endswith("==")
-        seg = part[2:-2] if is_hl else part
-        if seg == "":
+    """Pecah baris jadi kata + flag: hl(stabilo) it(italic) ul(garis bawah) circ(lingkaran)."""
+    results = []
+    def emit(text, hl, it, ul, circ):
+        for w in text.split(" "):
+            if w != "":
+                results.append((w, hl, it, ul, circ))
+    for p1 in re.split(r"(==.+?==)", line):
+        hl = len(p1) >= 4 and p1.startswith("==") and p1.endswith("==")
+        s1 = p1[2:-2] if hl else p1
+        if s1 == "":
             continue
-        for sub in re.split(r"(_[^_]+_)", seg):
-            is_it = len(sub) >= 2 and sub.startswith("_") and sub.endswith("_")
-            txt = sub[1:-1] if is_it else sub
-            for w in txt.split(" "):
-                if w != "":
-                    out.append((w, is_hl, is_it))
-    return out
+        for p2 in re.split(r"(\(\(.+?\)\))", s1):
+            circ = len(p2) >= 4 and p2.startswith("((") and p2.endswith("))")
+            s2 = p2[2:-2] if circ else p2
+            if s2 == "":
+                continue
+            for p3 in re.split(r"(~[^~]+~)", s2):
+                ul = len(p3) >= 2 and p3.startswith("~") and p3.endswith("~")
+                s3 = p3[1:-1] if ul else p3
+                if s3 == "":
+                    continue
+                for p4 in re.split(r"(_[^_]+_)", s3):
+                    it = len(p4) >= 2 and p4.startswith("_") and p4.endswith("_")
+                    s4 = p4[1:-1] if it else p4
+                    if s4 == "":
+                        continue
+                    emit(s4, hl, it, ul, circ)
+    return results
 
 
 # ======================================================================
@@ -265,7 +286,6 @@ def crop_to(im, w, h):
     return im.resize((w, h), Image.LANCZOS)
 
 def pencil_sketch(im):
-    """Ubah foto jadi efek sketsa pensil (gratis, tanpa AI)."""
     import numpy as np
     gray = ImageOps.grayscale(im)
     inv = ImageOps.invert(gray)
@@ -273,24 +293,41 @@ def pencil_sketch(im):
     a = np.asarray(gray, dtype=np.float32)
     b = np.asarray(blur, dtype=np.float32)
     with np.errstate(divide="ignore", invalid="ignore"):
-        res = a * 255.0 / (255.0 - b)          # color dodge
+        res = a * 255.0 / (255.0 - b)
     res[b >= 255] = 255
     res = np.clip(res, 0, 255).astype("uint8")
     sketch = Image.fromarray(res, "L")
     sketch = ImageOps.autocontrast(sketch, cutoff=1)
     return sketch.convert("RGB")
 
+def darken(im, amt=0.4):
+    return Image.blend(im, Image.new("RGB", im.size, (0, 0, 0)), amt)
+
 
 # ======================================================================
-# 5. WARNA TEMA
+# 5. STYLE / TEMA
 # ======================================================================
-def is_dark(theme):
-    return str(theme).strip().lower().startswith("gelap")
-
-def theme_colors(theme):
-    if is_dark(theme):
-        return dict(bg="121212", head="FFFFFF", body="D8D8D8", foot="FFFFFF", hl_text=INK)
-    return dict(bg=CREAM_COLOR, head=INK, body="555555", foot=INK, hl_text=INK)
+def style_of(theme):
+    t = str(theme).strip().lower()
+    if t.startswith("gelap"):
+        return dict(kind="gelap", bg="121212", head="FFFFFF", body="D8D8D8", foot="FFFFFF",
+                    photo="full", align="left", serif=False, quote=False,
+                    head_top=0.60, body_top=0.78, head_size=40, body_size=26)
+    if t.startswith("kertas") or t.startswith("manifest"):
+        return dict(kind="kertas", bg=CREAM_COLOR, head=INK, body="444444", foot=INK,
+                    photo="none", align="center", serif=True, quote=False,
+                    head_top=0.34, body_top=0.46, head_size=52, body_size=28)
+    if t.startswith("kutipan") or t.startswith("quote"):
+        return dict(kind="kutipan", bg="121212", head="FFFFFF", body="D8D8D8", foot="FFFFFF",
+                    photo="full", align="left", serif=False, quote=True,
+                    head_top=0.40, body_top=0.40, head_size=38, body_size=34)
+    if t.startswith("duo"):
+        return dict(kind="duo", bg="121212", head="FFFFFF", body="FFFFFF", foot="FFFFFF",
+                    photo="duo", align="left", serif=False, quote=False,
+                    head_top=0.30, body_top=0.72, head_size=30, body_size=30)
+    return dict(kind="krem", bg=CREAM_COLOR, head=INK, body="555555", foot=INK,
+                photo="frame", align="left", serif=False, quote=False,
+                head_top=0.50, body_top=0.67, head_size=40, body_size=26)
 
 
 def download_logo_path():
@@ -312,7 +349,6 @@ def download_logo_path():
 # 6. RAKIT .PPTX (untuk Canva)
 # ======================================================================
 def _set_highlight(run, hexcolor):
-    """Tambah stabilo (highlight) ke sebuah run — didukung PowerPoint & Canva."""
     try:
         rPr = run._r.get_or_add_rPr()
         hl = rPr.makeelement(qn('a:highlight'), {})
@@ -332,20 +368,23 @@ def _add_rich(slide, left, top, width, height, text, size_pt, bold, font, color_
         p = tf.paragraphs[0] if first else tf.add_paragraph()
         first = False
         p.alignment = align
-        words = rich_words(line) if highlight else [(w, False, False) for w in line.split(" ") if w]
+        words = rich_words(line) if highlight else [(w, False, False, False, False) for w in line.split(" ") if w]
         if not words:
-            words = [("", False, False)]
-        for j, (w, is_hl, is_it) in enumerate(words):
+            words = [("", False, False, False, False)]
+        for j, (w, is_hl, is_it, is_ul, is_circ) in enumerate(words):
             run = p.add_run()
             run.text = (w if j == 0 else " " + w)
             f = run.font
             f.size = Pt(size_pt)
             f.bold = bold
             f.italic = italic or is_it
+            f.underline = is_ul
             f.name = font
             if is_hl:
                 f.color.rgb = hex_rgb(INK)
                 _set_highlight(run, ACCENT_COLOR)
+            elif is_ul:
+                f.color.rgb = hex_rgb(ACCENT_COLOR)
             else:
                 f.color.rgb = hex_rgb(color_hex)
     return box
@@ -357,24 +396,41 @@ def build_pptx(slides_data, out_path, logo_path):
     blank = prs.slide_layouts[6]
 
     for s in slides_data:
-        c = theme_colors(s["theme"])
-        dark = is_dark(s["theme"])
+        st = style_of(s["theme"])
         slide = prs.slides.add_slide(blank)
 
-        # background
         bg = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, prs.slide_width, prs.slide_height)
-        bg.fill.solid(); bg.fill.fore_color.rgb = hex_rgb(c["bg"])
+        bg.fill.solid(); bg.fill.fore_color.rgb = hex_rgb(st["bg"])
         bg.line.fill.background(); bg.shadow.inherit = False
 
-        if dark:
-            # foto full-bleed + panah/teks di bawah
+        # ---- DUO ----
+        if s.get("duo"):
+            panels = s["panels"]
+            if len(panels) >= 1:
+                slide.shapes.add_picture(panels[0]["image_path"], 0, 0, width=prs.slide_width, height=fy(0.5))
+            if len(panels) >= 2:
+                slide.shapes.add_picture(panels[1]["image_path"], 0, fy(0.5), width=prs.slide_width, height=fy(0.5))
+            if logo_path:
+                try:
+                    slide.shapes.add_picture(logo_path, fx(0.06), fy(0.05), height=fy(0.045))
+                except Exception:
+                    pass
+            _add_rich(slide, 0.55, 0.05, 0.39, 0.07, HASHTAG, 12, True, BODY_FONT, ACCENT_COLOR,
+                      align=PP_ALIGN.RIGHT, highlight=False)
+            if len(panels) >= 1 and panels[0]["caption"]:
+                _add_rich(slide, 0.07, 0.30, 0.86, 0.16, panels[0]["caption"], 20, True, BODY_FONT, "FFFFFF")
+            if len(panels) >= 2 and panels[1]["caption"]:
+                _add_rich(slide, 0.07, 0.72, 0.86, 0.16, panels[1]["caption"], 20, True, BODY_FONT, "FFFFFF")
+            _add_rich(slide, 0.08, 0.90, 0.55, 0.08, FOOTER_TEXT, 13, True, BODY_FONT, "FFFFFF", highlight=False)
+            if s["total"] > 1:
+                _add_rich(slide, 0.82, 0.90, 0.12, 0.07, ARROW_TEXT, 24, True, BODY_FONT, "FFFFFF",
+                          align=PP_ALIGN.RIGHT, highlight=False)
+            continue
+
+        if st["photo"] == "full" and s.get("image_path"):
             slide.shapes.add_picture(s["image_path"], 0, 0, width=prs.slide_width, height=prs.slide_height)
-            head_top, body_top = 0.60, 0.78
-        else:
-            # foto di frame atas (rounded), teks di bawah
-            slide.shapes.add_picture(s["image_path"], fx(0.07), fy(0.11),
-                                     width=fx(0.86), height=fy(0.34))
-            head_top, body_top = 0.50, 0.67
+        elif st["photo"] == "frame" and s.get("image_path"):
+            slide.shapes.add_picture(s["image_path"], fx(0.07), fy(0.11), width=fx(0.86), height=fy(0.34))
 
         # logo + hashtag
         if logo_path:
@@ -385,16 +441,23 @@ def build_pptx(slides_data, out_path, logo_path):
         _add_rich(slide, 0.55, 0.05, 0.39, 0.07, HASHTAG, 12, True, BODY_FONT, ACCENT_COLOR,
                   align=PP_ALIGN.RIGHT, highlight=False)
 
-        # headline + body
-        if s["headline"]:
-            _add_rich(slide, 0.07, head_top, 0.86, 0.18, s["headline"], 28, True, HEADLINE_FONT, c["head"])
-        if s["body"]:
-            _add_rich(slide, 0.07, body_top, 0.86, 0.18, s["body"], 16, False, BODY_FONT, c["body"])
+        # tanda kutip hijau besar (Kutipan)
+        if st["quote"]:
+            _add_rich(slide, 0.07, 0.30, 0.2, 0.12, "“", 90, True, SERIF_FONT, ACCENT_COLOR, highlight=False)
 
-        # footer + panah
-        _add_rich(slide, 0.08, 0.90, 0.55, 0.08, FOOTER_TEXT, 13, True, BODY_FONT, c["foot"], highlight=False)
+        align = PP_ALIGN.CENTER if st["align"] == "center" else PP_ALIGN.LEFT
+        head_font = SERIF_FONT if st["serif"] else HEADLINE_FONT
+        left = 0.07; width = 0.86
+        if s["headline"]:
+            _add_rich(slide, left, st["head_top"], width, 0.20, s["headline"],
+                      st["head_size"] * 0.66, True, head_font, st["head"], align=align)
+        if s["body"]:
+            _add_rich(slide, left, st["body_top"], width, 0.24, s["body"],
+                      st["body_size"] * 0.62, False, BODY_FONT, st["body"], align=align)
+
+        _add_rich(slide, 0.08, 0.90, 0.55, 0.08, FOOTER_TEXT, 13, True, BODY_FONT, st["foot"], highlight=False)
         if s["total"] > 1:
-            _add_rich(slide, 0.82, 0.90, 0.12, 0.07, ARROW_TEXT, 24, True, BODY_FONT, c["head"],
+            _add_rich(slide, 0.82, 0.90, 0.12, 0.07, ARROW_TEXT, 24, True, BODY_FONT, st["head"],
                       align=PP_ALIGN.RIGHT, highlight=False)
 
     prs.save(out_path)
@@ -402,7 +465,7 @@ def build_pptx(slides_data, out_path, logo_path):
 
 
 # ======================================================================
-# 7. RAKIT .SVG (untuk Figma) — stabilo hijau digambar sebagai blok
+# 7. RAKIT .SVG (untuk Figma)
 # ======================================================================
 def _img_data_uri(path):
     im = Image.open(path).convert("RGB")
@@ -412,8 +475,7 @@ def _img_data_uri(path):
 def _svg_escape(t):
     return html.escape(t or "", quote=True)
 
-def _svg_rich(text, x0, y0, width, size, bold, font, color_hex, gap=1.34):
-    """Render teks + stabilo hijau (blok menerus) di belakang frasa ber-highlight."""
+def _svg_rich(text, x0, y0, width, size, bold, font, color_hex, align="left", gap=1.34):
     weight = "700" if bold else "400"
     char_w = size * (0.64 if bold else 0.58)
     space_w = size * 0.46
@@ -423,54 +485,65 @@ def _svg_rich(text, x0, y0, width, size, bold, font, color_hex, gap=1.34):
         words = rich_words(src_line)
         if not words:
             y += int(size * gap); continue
-        # bungkus jadi baris visual sesuai lebar
         vlines, cur, cur_w = [], [], 0
-        for w, is_hl, is_it in words:
+        for w, hl, it, ul, cc in words:
             ww = len(w) * char_w
             add = ww + (space_w if cur else 0)
             if cur and cur_w + add > width:
-                vlines.append(cur); cur, cur_w = [], 0
+                vlines.append((cur, cur_w)); cur, cur_w = [], 0
                 add = ww
-            cur.append((w, is_hl, is_it, ww)); cur_w += add
+            cur.append((w, hl, it, ul, cc, ww)); cur_w += add
         if cur:
-            vlines.append(cur)
-        for vl in vlines:
+            vlines.append((cur, cur_w))
+        for vl, line_w in vlines:
             baseline = y + size
-            # 1) hitung posisi x tiap kata
+            start_x = x0
+            if align == "center":
+                start_x = x0 + max(0, (width - line_w) / 2)
             positions = []
-            cx = x0
-            for k, (w, is_hl, is_it, ww) in enumerate(vl):
+            cx = start_x
+            for k, tup in enumerate(vl):
                 if k > 0:
                     cx += space_w
                 positions.append(cx)
-                cx += ww
-            # 2) gambar stabilo: gabung kata highlight berurutan jadi satu blok
-            k = 0
-            while k < len(vl):
-                if vl[k][1]:
-                    j = k
-                    while j + 1 < len(vl) and vl[j + 1][1]:
-                        j += 1
-                    x_start = positions[k]
-                    x_end = positions[j] + vl[j][3]
-                    pad = size * 0.12
-                    out.append(
-                        f'<rect x="{int(x_start - pad)}" y="{int(baseline - size*0.86)}" '
-                        f'width="{int(x_end - x_start + pad*2)}" height="{int(size*1.10)}" '
-                        f'rx="{int(size*0.10)}" fill="#{ACCENT_COLOR}"/>'
-                    )
-                    k = j + 1
-                else:
-                    k += 1
-            # 3) gambar teks
-            for (w, is_hl, is_it, ww), px in zip(vl, positions):
-                fill = INK if is_hl else color_hex
-                style = ' font-style="italic"' if is_it else ""
-                out.append(
-                    f'<text x="{int(px)}" y="{int(baseline)}"{style} '
-                    f'font-family="{_svg_escape(font)}, Arial, sans-serif" '
-                    f'font-size="{size}" font-weight="{weight}" fill="#{fill}">{_svg_escape(w)}</text>'
-                )
+                cx += tup[5]
+            # dekorasi: gabung run berurutan yang berflag sama
+            def runs(flag_idx):
+                k = 0
+                while k < len(vl):
+                    if vl[k][flag_idx]:
+                        j = k
+                        while j + 1 < len(vl) and vl[j + 1][flag_idx]:
+                            j += 1
+                        yield positions[k], positions[j] + vl[j][5]
+                        k = j + 1
+                    else:
+                        k += 1
+            # stabilo (hl) idx1
+            for xs, xe in runs(1):
+                pad = size * 0.12
+                out.append(f'<rect x="{int(xs-pad)}" y="{int(baseline-size*0.86)}" '
+                           f'width="{int(xe-xs+pad*2)}" height="{int(size*1.10)}" rx="{int(size*0.10)}" '
+                           f'fill="#{ACCENT_COLOR}"/>')
+            # lingkaran (circ) idx4
+            for xs, xe in runs(4):
+                pad = size * 0.22
+                cxp = (xs + xe) / 2
+                rxp = (xe - xs) / 2 + pad
+                out.append(f'<ellipse cx="{int(cxp)}" cy="{int(baseline-size*0.34)}" '
+                           f'rx="{int(rxp)}" ry="{int(size*0.72)}" fill="none" '
+                           f'stroke="#{ACCENT_COLOR}" stroke-width="{max(3,int(size*0.06))}"/>')
+            # garis bawah (ul) idx3
+            for xs, xe in runs(3):
+                out.append(f'<rect x="{int(xs)}" y="{int(baseline+size*0.14)}" '
+                           f'width="{int(xe-xs)}" height="{max(3,int(size*0.09))}" fill="#{ACCENT_COLOR}"/>')
+            # teks
+            for (w, hl, it, ul, cc, ww), px in zip(vl, positions):
+                fill = INK if hl else color_hex
+                style = ' font-style="italic"' if it else ""
+                out.append(f'<text x="{int(px)}" y="{int(baseline)}"{style} '
+                           f'font-family="{_svg_escape(font)}, Arial, sans-serif" '
+                           f'font-size="{size}" font-weight="{weight}" fill="#{fill}">{_svg_escape(w)}</text>')
             y += int(size * gap)
     return "\n".join(out), y
 
@@ -490,54 +563,83 @@ def build_svg_single(slides_data, out_path, logo_path):
     parts = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}">']
     for idx, s in enumerate(slides_data):
         xo = idx * CANVAS_W
-        c = theme_colors(s["theme"])
-        dark = is_dark(s["theme"])
-        # background
-        parts.append(f'<rect x="{xo}" y="0" width="{CANVAS_W}" height="{H}" fill="#{c["bg"]}"/>')
-        if dark:
+        st = style_of(s["theme"])
+        parts.append(f'<rect x="{xo}" y="0" width="{CANVAS_W}" height="{H}" fill="#{st["bg"]}"/>')
+
+        # ---- DUO ----
+        if s.get("duo"):
+            panels = s["panels"]
+            if len(panels) >= 1:
+                parts.append(f'<image x="{xo}" y="0" width="{CANVAS_W}" height="{int(0.5*H)}" '
+                             f'preserveAspectRatio="xMidYMid slice" href="{_img_data_uri(panels[0]["image_path"])}"/>')
+            if len(panels) >= 2:
+                parts.append(f'<image x="{xo}" y="{int(0.5*H)}" width="{CANVAS_W}" height="{int(0.5*H)}" '
+                             f'preserveAspectRatio="xMidYMid slice" href="{_img_data_uri(panels[1]["image_path"])}"/>')
+            if logo_uri:
+                parts.append(f'<image x="{xo + int(0.06*CANVAS_W)}" y="{int(0.05*H)}" '
+                             f'height="{int(0.05*H)}" href="{logo_uri}"/>')
+            parts.append(f'<text x="{xo + int(0.94*CANVAS_W)}" y="{int(0.075*H)}" text-anchor="end" '
+                         f'font-family="{_svg_escape(BODY_FONT)}, Arial, sans-serif" font-size="22" '
+                         f'font-weight="700" fill="#{ACCENT_COLOR}">{_svg_escape(HASHTAG)}</text>')
+            if len(panels) >= 1 and panels[0]["caption"]:
+                svg, _ = _svg_rich(panels[0]["caption"], xo + int(0.07*CANVAS_W), int(0.30*H),
+                                   int(0.86*CANVAS_W), 30, True, BODY_FONT, "FFFFFF")
+                parts.append(svg)
+            if len(panels) >= 2 and panels[1]["caption"]:
+                svg, _ = _svg_rich(panels[1]["caption"], xo + int(0.07*CANVAS_W), int(0.72*H),
+                                   int(0.86*CANVAS_W), 30, True, BODY_FONT, "FFFFFF")
+                parts.append(svg)
+            parts.append(f'<rect x="{xo + int(0.06*CANVAS_W)}" y="{int(0.905*H)}" width="6" height="{int(0.05*H)}" fill="#{ACCENT_COLOR}"/>')
+            fsvg, _ = _svg_rich(FOOTER_TEXT, xo + int(0.09*CANVAS_W), int(0.905*H), int(0.5*CANVAS_W), 20, True, BODY_FONT, "FFFFFF")
+            parts.append(fsvg)
+            if total > 1:
+                parts.append(f'<text x="{xo + int(0.93*CANVAS_W)}" y="{int(0.95*H)}" text-anchor="end" '
+                             f'font-family="{_svg_escape(BODY_FONT)}, Arial, sans-serif" font-size="40" '
+                             f'font-weight="700" fill="#FFFFFF">{_svg_escape(ARROW_TEXT)}</text>')
+            continue
+
+        if st["photo"] == "full" and s.get("image_path"):
             parts.append(f'<image x="{xo}" y="0" width="{CANVAS_W}" height="{H}" '
                          f'preserveAspectRatio="xMidYMid slice" href="{_img_data_uri(s["image_path"])}"/>')
-            parts.append(f'<rect x="{xo}" y="{int(0.45*H)}" width="{CANVAS_W}" height="{int(0.55*H)}" '
-                         f'fill="#000000" opacity="0.45"/>')
-            head_y, body_y = int(0.60*H), int(0.78*H)
-        else:
+            parts.append(f'<rect x="{xo}" y="{int(0.32*H)}" width="{CANVAS_W}" height="{int(0.68*H)}" '
+                         f'fill="#000000" opacity="0.5"/>')
+        elif st["photo"] == "frame" and s.get("image_path"):
             fx0 = xo + int(0.07*CANVAS_W); fy0 = int(0.11*H)
             fw = int(0.86*CANVAS_W); fh = int(0.34*H)
             parts.append(f'<clipPath id="cp{idx}"><rect x="{fx0}" y="{fy0}" width="{fw}" height="{fh}" rx="28"/></clipPath>')
             parts.append(f'<image x="{fx0}" y="{fy0}" width="{fw}" height="{fh}" '
                          f'preserveAspectRatio="xMidYMid slice" clip-path="url(#cp{idx})" '
                          f'href="{_img_data_uri(s["image_path"])}"/>')
-            head_y, body_y = int(0.50*H), int(0.67*H)
 
         if logo_uri:
             parts.append(f'<image x="{xo + int(0.06*CANVAS_W)}" y="{int(0.05*H)}" '
                          f'height="{int(0.05*H)}" href="{logo_uri}"/>')
-        parts.append(
-            f'<text x="{xo + int(0.94*CANVAS_W)}" y="{int(0.075*H)}" text-anchor="end" '
-            f'font-family="{_svg_escape(BODY_FONT)}, Arial, sans-serif" font-size="22" '
-            f'font-weight="700" fill="#{ACCENT_COLOR}">{_svg_escape(HASHTAG)}</text>'
-        )
+        parts.append(f'<text x="{xo + int(0.94*CANVAS_W)}" y="{int(0.075*H)}" text-anchor="end" '
+                     f'font-family="{_svg_escape(BODY_FONT)}, Arial, sans-serif" font-size="22" '
+                     f'font-weight="700" fill="#{ACCENT_COLOR}">{_svg_escape(HASHTAG)}</text>')
 
+        if st["quote"]:
+            parts.append(f'<text x="{xo + int(0.07*CANVAS_W)}" y="{int(0.36*H)}" '
+                         f'font-family="{_svg_escape(SERIF_FONT)}, Georgia, serif" font-size="150" '
+                         f'font-weight="700" fill="#{ACCENT_COLOR}">“</text>')
+
+        hx = xo + int(0.07*CANVAS_W); hw = int(0.86*CANVAS_W)
         if s["headline"]:
-            svg, _ = _svg_rich(s["headline"], xo + int(0.07*CANVAS_W), head_y,
-                               int(0.86*CANVAS_W), 42, True, HEADLINE_FONT, c["head"])
+            svg, _ = _svg_rich(s["headline"], hx, int(st["head_top"]*H), hw, st["head_size"], True,
+                               SERIF_FONT if st["serif"] else HEADLINE_FONT, st["head"], align=st["align"])
             parts.append(svg)
         if s["body"]:
-            svg, _ = _svg_rich(s["body"], xo + int(0.07*CANVAS_W), body_y,
-                               int(0.86*CANVAS_W), 26, False, BODY_FONT, c["body"])
+            svg, _ = _svg_rich(s["body"], hx, int(st["body_top"]*H), hw, st["body_size"], False,
+                               BODY_FONT, st["body"], align=st["align"])
             parts.append(svg)
 
-        # footer + garis hijau + panah
         parts.append(f'<rect x="{xo + int(0.06*CANVAS_W)}" y="{int(0.905*H)}" width="6" height="{int(0.05*H)}" fill="#{ACCENT_COLOR}"/>')
-        fsvg, _ = _svg_rich(FOOTER_TEXT, xo + int(0.09*CANVAS_W), int(0.905*H),
-                            int(0.5*CANVAS_W), 20, True, BODY_FONT, c["foot"])
+        fsvg, _ = _svg_rich(FOOTER_TEXT, xo + int(0.09*CANVAS_W), int(0.905*H), int(0.5*CANVAS_W), 20, True, BODY_FONT, st["foot"])
         parts.append(fsvg)
         if total > 1:
-            parts.append(
-                f'<text x="{xo + int(0.93*CANVAS_W)}" y="{int(0.95*H)}" text-anchor="end" '
-                f'font-family="{_svg_escape(BODY_FONT)}, Arial, sans-serif" font-size="40" '
-                f'font-weight="700" fill="#{c["head"]}">{_svg_escape(ARROW_TEXT)}</text>'
-            )
+            parts.append(f'<text x="{xo + int(0.93*CANVAS_W)}" y="{int(0.95*H)}" text-anchor="end" '
+                         f'font-family="{_svg_escape(BODY_FONT)}, Arial, sans-serif" font-size="40" '
+                         f'font-weight="700" fill="#{st["head"]}">{_svg_escape(ARROW_TEXT)}</text>')
     parts.append('</svg>')
     with open(out_path, "w", encoding="utf-8") as f:
         f.write("\n".join(parts))
@@ -589,6 +691,7 @@ def process_page(page, workdir):
     content = read_property(props, CONTENT_PROPERTY, "rich_text")
     keywords = read_property(props, KEYWORD_PROPERTY, "rich_text")
     theme = read_property(props, THEME_PROPERTY, "select") or DEFAULT_THEME
+    st = style_of(theme)
 
     if not content.strip():
         raise ValueError("Kolom 'Konten' kosong.")
@@ -605,32 +708,59 @@ def process_page(page, workdir):
     used_ids = set()
     total = len(slide_blocks)
     for i, block in enumerate(slide_blocks, start=1):
+        # ---- Style DUO: 2 foto ditumpuk + caption (panel dipisah '///') ----
+        if st["kind"] == "duo":
+            panels_raw = [p.strip() for p in re.split(r"\s*///\s*", block) if p.strip()][:2]
+            if not panels_raw:
+                raise ValueError(f"Slide {i} (Duo) kosong. Format: URL1 + caption /// URL2 + caption.")
+            panels = []
+            for pnl in panels_raw:
+                purl, pclean = extract_url_from_block(pnl)
+                cap = pclean.strip()
+                if purl:
+                    pim = Image.open(io.BytesIO(fetch_image_bytes(purl))).convert("RGB")
+                else:
+                    q = keyword_for(0, [], cap, "")
+                    data, credit = pexels_pick(q, used_ids)
+                    if not data:
+                        raise ValueError(f"Slide {i} (Duo): gambar Pexels tidak ketemu untuk '{q}'.")
+                    pim = Image.open(io.BytesIO(data)).convert("RGB")
+                    if credit:
+                        credits.append(f"Slide {i}: {credit}")
+                pim = darken(crop_to(pim, CANVAS_W, int(0.5 * CANVAS_H)), 0.42)
+                ppath = os.path.join(workdir, f"slide_{i}_{len(panels)+1}.png")
+                pim.save(ppath, "PNG")
+                preview_paths.append(ppath)
+                panels.append({"image_path": ppath, "caption": cap})
+            slides_data.append({"duo": True, "panels": panels, "headline": "", "body": "",
+                                "image_path": None, "index": i, "total": total, "theme": theme})
+            continue
+
         inline_url, clean = extract_url_from_block(block)
         headline, body = headline_and_body(clean)
 
-        if inline_url:                                   # ada link -> pakai
-            im = Image.open(io.BytesIO(fetch_image_bytes(inline_url))).convert("RGB")
-        else:                                            # tidak ada -> ambil Pexels
-            q = keyword_for(i - 1, keyword_blocks, headline, body)
-            data, credit = pexels_pick(q, used_ids)
-            if not data:
-                raise ValueError(f"Slide {i}: gambar Pexels tidak ketemu untuk '{q}'.")
-            im = Image.open(io.BytesIO(data)).convert("RGB")
-            if credit:
-                credits.append(f"Slide {i}: {credit}")
+        img_path = None
+        if st["photo"] != "none":
+            if inline_url:
+                im = Image.open(io.BytesIO(fetch_image_bytes(inline_url))).convert("RGB")
+            else:
+                q = keyword_for(i - 1, keyword_blocks, headline, body)
+                data, credit = pexels_pick(q, used_ids)
+                if not data:
+                    raise ValueError(f"Slide {i}: gambar Pexels tidak ketemu untuk '{q}'.")
+                im = Image.open(io.BytesIO(data)).convert("RGB")
+                if credit:
+                    credits.append(f"Slide {i}: {credit}")
+            if st["photo"] == "frame":
+                im = crop_to(im, int(0.86 * CANVAS_W), int(0.34 * CANVAS_H))
+            else:
+                im = crop_to(im, CANVAS_W, CANVAS_H)
+            if is_single:
+                im = pencil_sketch(im)
+            img_path = os.path.join(workdir, f"slide_{i}.png")
+            im.save(img_path, "PNG")
+            preview_paths.append(img_path)
 
-        # ukuran area gambar sesuai tema
-        if is_dark(theme):
-            im = crop_to(im, CANVAS_W, CANVAS_H)
-        else:
-            im = crop_to(im, int(0.86 * CANVAS_W), int(0.34 * CANVAS_H))
-
-        if is_single:                                    # single post -> sketsa pensil
-            im = pencil_sketch(im)
-
-        img_path = os.path.join(workdir, f"slide_{i}.png")
-        im.save(img_path, "PNG")
-        preview_paths.append(img_path)
         slides_data.append({"headline": headline, "body": body, "image_path": img_path,
                             "index": i, "total": total, "theme": theme})
 
@@ -648,7 +778,7 @@ def process_page(page, workdir):
     tg_message("\n".join(lines))
 
     for i, p in enumerate(preview_paths, start=1):
-        tg_photo(p, caption=f"Preview slide {i}/{total}")
+        tg_photo(p, caption=f"Preview gambar slide {i}")
 
     if OUTPUT_PPTX:
         pptx_path = os.path.join(workdir, f"{safe_name}.pptx")
