@@ -206,15 +206,20 @@ def keyword_for(index, keyword_blocks, headline, body):
     words = re.sub(r"[^\w\s]", " ", q).split()
     return " ".join(words[:4]) if words else "aesthetic minimal"
 
-def hl_words(line):
-    """Pecah 1 baris jadi kata-kata + tanda apakah di-highlight (==...==)."""
+def rich_words(line):
+    """Pecah 1 baris jadi kata + tanda highlight (==..==) & italic (_.._)."""
     out = []
     for part in re.split(r"(==.+?==)", line):
         is_hl = len(part) >= 4 and part.startswith("==") and part.endswith("==")
         seg = part[2:-2] if is_hl else part
-        for w in seg.split(" "):
-            if w != "":
-                out.append((w, is_hl))
+        if seg == "":
+            continue
+        for sub in re.split(r"(_[^_]+_)", seg):
+            is_it = len(sub) >= 2 and sub.startswith("_") and sub.endswith("_")
+            txt = sub[1:-1] if is_it else sub
+            for w in txt.split(" "):
+                if w != "":
+                    out.append((w, is_hl, is_it))
     return out
 
 
@@ -327,16 +332,16 @@ def _add_rich(slide, left, top, width, height, text, size_pt, bold, font, color_
         p = tf.paragraphs[0] if first else tf.add_paragraph()
         first = False
         p.alignment = align
-        words = hl_words(line) if highlight else [(w, False) for w in line.split(" ") if w]
+        words = rich_words(line) if highlight else [(w, False, False) for w in line.split(" ") if w]
         if not words:
-            words = [("", False)]
-        for j, (w, is_hl) in enumerate(words):
+            words = [("", False, False)]
+        for j, (w, is_hl, is_it) in enumerate(words):
             run = p.add_run()
             run.text = (w if j == 0 else " " + w)
             f = run.font
             f.size = Pt(size_pt)
             f.bold = bold
-            f.italic = italic
+            f.italic = italic or is_it
             f.name = font
             if is_hl:
                 f.color.rgb = hex_rgb(INK)
@@ -415,18 +420,18 @@ def _svg_rich(text, x0, y0, width, size, bold, font, color_hex, gap=1.34):
     out = []
     y = y0
     for src_line in text.split("\n"):
-        words = hl_words(src_line)
+        words = rich_words(src_line)
         if not words:
             y += int(size * gap); continue
         # bungkus jadi baris visual sesuai lebar
         vlines, cur, cur_w = [], [], 0
-        for w, is_hl in words:
+        for w, is_hl, is_it in words:
             ww = len(w) * char_w
             add = ww + (space_w if cur else 0)
             if cur and cur_w + add > width:
                 vlines.append(cur); cur, cur_w = [], 0
                 add = ww
-            cur.append((w, is_hl, ww)); cur_w += add
+            cur.append((w, is_hl, is_it, ww)); cur_w += add
         if cur:
             vlines.append(cur)
         for vl in vlines:
@@ -434,12 +439,12 @@ def _svg_rich(text, x0, y0, width, size, bold, font, color_hex, gap=1.34):
             # 1) hitung posisi x tiap kata
             positions = []
             cx = x0
-            for k, (w, is_hl, ww) in enumerate(vl):
+            for k, (w, is_hl, is_it, ww) in enumerate(vl):
                 if k > 0:
                     cx += space_w
                 positions.append(cx)
                 cx += ww
-            # 2) gambar stabilo: gabung kata highlight yang berurutan jadi satu blok
+            # 2) gambar stabilo: gabung kata highlight berurutan jadi satu blok
             k = 0
             while k < len(vl):
                 if vl[k][1]:
@@ -447,7 +452,7 @@ def _svg_rich(text, x0, y0, width, size, bold, font, color_hex, gap=1.34):
                     while j + 1 < len(vl) and vl[j + 1][1]:
                         j += 1
                     x_start = positions[k]
-                    x_end = positions[j] + vl[j][2]
+                    x_end = positions[j] + vl[j][3]
                     pad = size * 0.12
                     out.append(
                         f'<rect x="{int(x_start - pad)}" y="{int(baseline - size*0.86)}" '
@@ -458,10 +463,11 @@ def _svg_rich(text, x0, y0, width, size, bold, font, color_hex, gap=1.34):
                 else:
                     k += 1
             # 3) gambar teks
-            for (w, is_hl, ww), px in zip(vl, positions):
+            for (w, is_hl, is_it, ww), px in zip(vl, positions):
                 fill = INK if is_hl else color_hex
+                style = ' font-style="italic"' if is_it else ""
                 out.append(
-                    f'<text x="{int(px)}" y="{int(baseline)}" '
+                    f'<text x="{int(px)}" y="{int(baseline)}"{style} '
                     f'font-family="{_svg_escape(font)}, Arial, sans-serif" '
                     f'font-size="{size}" font-weight="{weight}" fill="#{fill}">{_svg_escape(w)}</text>'
                 )
