@@ -296,16 +296,30 @@ def unsplash_pick(query, used_ids):
     return requests.get(img_url, timeout=60).content, f"Foto: {name} (Unsplash)"
 
 def image_pick(query, used_ids):
-    """Ambil gambar: Unsplash dulu (utama), Pexels cadangan."""
+    """Ambil gambar: Unsplash dulu (utama), Pexels cadangan.
+    Kalau kata kunci tak dapat gambar, coba kata kunci cadangan Inggris."""
     sources = (["unsplash", "pexels"] if UNSPLASH_ACCESS_KEY else ["pexels"])
-    for src in sources:
-        try:
-            data, credit = (unsplash_pick if src == "unsplash" else pexels_pick)(query, used_ids)
-            if data:
-                return data, credit
-        except Exception as e:
-            print(f"    ! {src} gagal: {e}")
+    queries = [query, "calm aesthetic minimal lifestyle", "soft natural light nature"]
+    for q in queries:
+        for src in sources:
+            try:
+                data, credit = (unsplash_pick if src == "unsplash" else pexels_pick)(q, used_ids)
+                if data:
+                    return data, credit
+            except Exception as e:
+                print(f"    ! {src} gagal ('{q}'): {e}")
     return None, None
+
+def make_placeholder():
+    """Background netral (gradasi gelap) kalau benar-benar tak ada gambar."""
+    im = Image.new("RGB", (CANVAS_W, CANVAS_H))
+    import numpy as np
+    top = np.array([40, 44, 38]); bot = np.array([12, 12, 12])
+    arr = np.zeros((CANVAS_H, CANVAS_W, 3), dtype="uint8")
+    for y in range(CANVAS_H):
+        t = y / CANVAS_H
+        arr[y, :] = (top * (1 - t) + bot * t).astype("uint8")
+    return Image.fromarray(arr, "RGB")
 
 def crop_to(im, w, h):
     target = w / h
@@ -756,9 +770,12 @@ def process_page(page, workdir):
                 else:
                     q = keyword_for(0, [], cap, "")
                     data, credit = image_pick(q, used_ids)
-                    if not data:
-                        raise ValueError(f"Slide {i} (Duo): gambar Pexels tidak ketemu untuk '{q}'.")
-                    pim = Image.open(io.BytesIO(data)).convert("RGB")
+                    if data:
+                        pim = Image.open(io.BytesIO(data)).convert("RGB")
+                        if credit:
+                            credits.append(f"Slide {i}: {credit}")
+                    else:
+                        pim = make_placeholder()
                     if credit:
                         credits.append(f"Slide {i}: {credit}")
                 pim = darken(crop_to(pim, CANVAS_W, int(0.5 * CANVAS_H)), 0.42)
@@ -780,11 +797,13 @@ def process_page(page, workdir):
             else:
                 q = keyword_for(i - 1, keyword_blocks, headline, body)
                 data, credit = image_pick(q, used_ids)
-                if not data:
-                    raise ValueError(f"Slide {i}: gambar Pexels tidak ketemu untuk '{q}'.")
-                im = Image.open(io.BytesIO(data)).convert("RGB")
-                if credit:
-                    credits.append(f"Slide {i}: {credit}")
+                if data:
+                    im = Image.open(io.BytesIO(data)).convert("RGB")
+                    if credit:
+                        credits.append(f"Slide {i}: {credit}")
+                else:
+                    im = make_placeholder()
+                    credits.append(f"Slide {i}: (background netral — gambar '{q}' tak ditemukan)")
             if st["photo"] == "frame":
                 im = crop_to(im, int(0.86 * CANVAS_W), int(0.34 * CANVAS_H))
             else:
