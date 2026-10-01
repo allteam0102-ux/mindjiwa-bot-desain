@@ -69,6 +69,7 @@ CANVAS_H = int(os.environ.get("CANVAS_H") or 1350)
 
 OUTPUT_PPTX = (os.environ.get("OUTPUT_PPTX") or "true").lower() == "true"
 OUTPUT_SVG  = (os.environ.get("OUTPUT_SVG")  or "true").lower() == "true"
+OUTPUT_SVG_PER_SLIDE = (os.environ.get("OUTPUT_SVG_PER_SLIDE") or "true").lower() == "true"
 
 
 # ======================================================================
@@ -98,6 +99,7 @@ STATUS_READY = env("STATUS_READY", "Siap Desain")
 STATUS_DONE  = env("STATUS_DONE",  "Terkirim")
 STATUS_ERROR = env("STATUS_ERROR", "Gagal")
 STATUS_TYPE  = env("STATUS_TYPE", "select").strip().lower()
+DONE_EMOJI   = env("DONE_EMOJI", "✅")      # ✅ ikon halaman saat selesai
 
 PEXELS_ORIENTATION = "portrait" if CANVAS_H > CANVAS_W else "square"
 
@@ -139,7 +141,7 @@ def notion_find_ready():
         raise SystemExit(f"[NOTION ERROR] {resp.status_code}: {resp.text}")
     return resp.json().get("results", [])
 
-def notion_set_status(page_id, status_value, note=None):
+def notion_set_status(page_id, status_value, note=None, icon_emoji=None):
     url = f"{NOTION_BASE}/pages/{page_id}"
     if STATUS_TYPE == "status":
         props = {STATUS_PROPERTY: {"status": {"name": status_value}}}
@@ -148,9 +150,16 @@ def notion_set_status(page_id, status_value, note=None):
     props_with_note = dict(props)
     if note:
         props_with_note["Catatan"] = {"rich_text": [{"text": {"content": note[:1900]}}]}
-    r = requests.patch(url, headers=NOTION_HEADERS, json={"properties": props_with_note}, timeout=60)
-    if r.status_code != 200 and note:
-        requests.patch(url, headers=NOTION_HEADERS, json={"properties": props}, timeout=60)
+    body = {"properties": props_with_note}
+    if icon_emoji:
+        body["icon"] = {"type": "emoji", "emoji": icon_emoji}   # ubah ikon halaman (penanda selesai)
+    r = requests.patch(url, headers=NOTION_HEADERS, json=body, timeout=60)
+    if r.status_code != 200:
+        # ulangi tanpa catatan (kalau kolom Catatan tak ada), ikon tetap diubah
+        body2 = {"properties": props}
+        if icon_emoji:
+            body2["icon"] = {"type": "emoji", "emoji": icon_emoji}
+        requests.patch(url, headers=NOTION_HEADERS, json=body2, timeout=60)
 
 def _plain_text(rich_list):
     return "".join(part.get("plain_text", "") for part in (rich_list or []))
@@ -833,17 +842,27 @@ def process_page(page, workdir):
     for i, p in enumerate(preview_paths, start=1):
         tg_photo(p, caption=f"Preview gambar slide {i}")
 
+    # pembatas + nama konten sebelum kirim file
+    tg_message(f"📎 ====================\nFILE DESAIN: {title}\n====================")
+
     if OUTPUT_PPTX:
         pptx_path = os.path.join(workdir, f"{safe_name}.pptx")
         build_pptx(slides_data, pptx_path, logo_path)
-        if not tg_document(pptx_path, caption=f"{title} — .pptx: import ke Canva ✨"):
+        if not tg_document(pptx_path, caption=f"{title} — .pptx (semua slide): import ke Canva ✨"):
             tg_message("⚠️ File .pptx gagal dikirim (cek log).")
 
     if OUTPUT_SVG:
         svg_path = os.path.join(workdir, f"{safe_name}.svg")
         build_svg_single(slides_data, svg_path, logo_path)
-        if not tg_document(svg_path, caption=f"{title} — .svg: tarik ke Figma (teks bisa diedit) ✨"):
+        if not tg_document(svg_path, caption=f"{title} — .svg (semua slide): tarik ke Figma ✨"):
             tg_message("⚠️ File .svg gagal dikirim (cek log).")
+
+    if OUTPUT_SVG_PER_SLIDE and total > 1:
+        for s in slides_data:
+            sp = os.path.join(workdir, f"{safe_name}_slide{s['index']}.svg")
+            build_svg_single([s], sp, logo_path)
+            if not tg_document(sp, caption=f"{title} — slide {s['index']}/{total} (.svg per slide)"):
+                tg_message(f"⚠️ SVG slide {s['index']} gagal dikirim (cek log).")
 
     return total
 
@@ -868,8 +887,8 @@ def main():
         workdir = tempfile.mkdtemp()
         try:
             process_page(page, workdir)
-            notion_set_status(page_id, STATUS_DONE)
-            print("  v Sukses & status diubah jadi:", STATUS_DONE)
+            notion_set_status(page_id, STATUS_DONE, icon_emoji=DONE_EMOJI)
+            print("  v Sukses & status diubah jadi:", STATUS_DONE, "| ikon ->", DONE_EMOJI)
         except Exception as e:
             err = f"{type(e).__name__}: {e}"
             print("  x GAGAL:", err)
