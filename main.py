@@ -178,6 +178,16 @@ def read_property(props, name, kind):
         return (p.get("status") or {}).get("name", "").strip()
     return ""
 
+def get_title(props):
+    """Ambil judul: coba kolom bernama TITLE_PROPERTY, kalau kosong cari kolom bertipe 'title'."""
+    t = read_property(props, TITLE_PROPERTY, "title")
+    if t:
+        return t
+    for _name, p in props.items():
+        if isinstance(p, dict) and p.get("type") == "title":
+            return _plain_text(p.get("title", [])).strip()
+    return ""
+
 
 # ======================================================================
 # 3. PARSING ISI KONTEN
@@ -740,7 +750,7 @@ def tg_document(path, caption=""):
 # ======================================================================
 def process_page(page, workdir):
     props = page["properties"]
-    title = read_property(props, TITLE_PROPERTY, "title") or "Tanpa Judul"
+    title = get_title(props) or "Tanpa Judul"
     fmt = read_property(props, FORMAT_PROPERTY, "select") or "Single Post"
     content = read_property(props, CONTENT_PROPERTY, "rich_text")
     keywords = read_property(props, KEYWORD_PROPERTY, "rich_text")
@@ -894,7 +904,7 @@ def main():
             print("  x GAGAL:", err)
             traceback.print_exc()
             try:
-                tg_message(f"⚠️ Gagal memproses '{read_property(page['properties'], TITLE_PROPERTY, 'title')}'.\n{err}")
+                tg_message(f"⚠️ Gagal memproses '{get_title(page['properties'])}'.\n{err}")
             except Exception:
                 pass
             notion_set_status(page_id, STATUS_ERROR, note=err)
