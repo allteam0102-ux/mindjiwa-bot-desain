@@ -61,7 +61,7 @@ HEADLINE_FONT = os.environ.get("HEADLINE_FONT") or "Plus Jakarta Sans"
 SERIF_FONT    = os.environ.get("SERIF_FONT")    or "Playfair Display"
 BODY_FONT     = os.environ.get("BODY_FONT")     or "Plus Jakarta Sans"
 ARROW_TEXT    = os.environ.get("ARROW_TEXT")    or "→"
-STYLE_HINT    = os.environ.get("STYLE_HINT")    or "aesthetic lifestyle candid natural light"
+STYLE_HINT    = os.environ.get("STYLE_HINT")    or "aesthetic minimal editorial european film tones soft natural light premium"
 DEFAULT_THEME = (os.environ.get("DEFAULT_THEME") or "Krem").strip()
 
 CANVAS_W = int(os.environ.get("CANVAS_W") or 1080)
