@@ -57,9 +57,9 @@ FOOTER_TEXT   = os.environ.get("FOOTER_TEXT")   or "Curhat dan Konseling\nOnline
 ACCENT_COLOR  = (os.environ.get("ACCENT_COLOR") or "A6CE39").lstrip("#")    # hijau stabilo
 CREAM_COLOR   = (os.environ.get("CREAM_COLOR")  or "F3F1E7").lstrip("#")    # krem
 LOGO_URL      = os.environ.get("LOGO_URL")      or ""
-HEADLINE_FONT = os.environ.get("HEADLINE_FONT") or "Poppins"
+HEADLINE_FONT = os.environ.get("HEADLINE_FONT") or "Plus Jakarta Sans"
 SERIF_FONT    = os.environ.get("SERIF_FONT")    or "Playfair Display"
-BODY_FONT     = os.environ.get("BODY_FONT")     or "Poppins"
+BODY_FONT     = os.environ.get("BODY_FONT")     or "Plus Jakarta Sans"
 ARROW_TEXT    = os.environ.get("ARROW_TEXT")    or "→"
 STYLE_HINT    = os.environ.get("STYLE_HINT")    or "aesthetic lifestyle candid natural light"
 DEFAULT_THEME = (os.environ.get("DEFAULT_THEME") or "Krem").strip()
@@ -85,6 +85,7 @@ NOTION_DATABASE_ID  = env("NOTION_DATABASE_ID", required=True)
 PEXELS_API_KEY      = env("PEXELS_API_KEY", required=True)
 TELEGRAM_BOT_TOKEN  = env("TELEGRAM_BOT_TOKEN", required=True)
 TELEGRAM_CHAT_ID    = env("TELEGRAM_CHAT_ID", required=True)
+UNSPLASH_ACCESS_KEY = os.environ.get("UNSPLASH_ACCESS_KEY", "")   # opsional
 
 TITLE_PROPERTY   = env("TITLE_PROPERTY", "Judul")
 STATUS_PROPERTY  = env("STATUS_PROPERTY", "Status")
@@ -275,6 +276,36 @@ def pexels_pick(query, used_ids):
         used_ids.add(photo["id"])
     img_url = photo["src"].get("large2x") or photo["src"].get("large") or photo["src"]["original"]
     return requests.get(img_url, timeout=60).content, f'Foto: {photo.get("photographer","-")} (Pexels)'
+
+def unsplash_pick(query, used_ids):
+    r = requests.get("https://api.unsplash.com/search/photos",
+                     headers={"Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"},
+                     params={"query": query, "per_page": 15, "orientation": PEXELS_ORIENTATION}, timeout=60)
+    r.raise_for_status()
+    results = r.json().get("results", [])
+    if not results:
+        return None, None
+    fresh = [p for p in results if p.get("id") not in used_ids]
+    pool = fresh if fresh else results
+    photo = random.choice(pool[:8])
+    if photo.get("id"):
+        used_ids.add(photo["id"])
+    urls = photo.get("urls", {})
+    img_url = urls.get("regular") or urls.get("full") or urls.get("raw")
+    name = (photo.get("user") or {}).get("name", "-")
+    return requests.get(img_url, timeout=60).content, f"Foto: {name} (Unsplash)"
+
+def image_pick(query, used_ids):
+    """Ambil gambar: Unsplash dulu (utama), Pexels cadangan."""
+    sources = (["unsplash", "pexels"] if UNSPLASH_ACCESS_KEY else ["pexels"])
+    for src in sources:
+        try:
+            data, credit = (unsplash_pick if src == "unsplash" else pexels_pick)(query, used_ids)
+            if data:
+                return data, credit
+        except Exception as e:
+            print(f"    ! {src} gagal: {e}")
+    return None, None
 
 def crop_to(im, w, h):
     target = w / h
@@ -724,7 +755,7 @@ def process_page(page, workdir):
                     pim = Image.open(io.BytesIO(fetch_image_bytes(purl))).convert("RGB")
                 else:
                     q = keyword_for(0, [], cap, "")
-                    data, credit = pexels_pick(q, used_ids)
+                    data, credit = image_pick(q, used_ids)
                     if not data:
                         raise ValueError(f"Slide {i} (Duo): gambar Pexels tidak ketemu untuk '{q}'.")
                     pim = Image.open(io.BytesIO(data)).convert("RGB")
@@ -748,7 +779,7 @@ def process_page(page, workdir):
                 im = Image.open(io.BytesIO(fetch_image_bytes(inline_url))).convert("RGB")
             else:
                 q = keyword_for(i - 1, keyword_blocks, headline, body)
-                data, credit = pexels_pick(q, used_ids)
+                data, credit = image_pick(q, used_ids)
                 if not data:
                     raise ValueError(f"Slide {i}: gambar Pexels tidak ketemu untuk '{q}'.")
                 im = Image.open(io.BytesIO(data)).convert("RGB")
