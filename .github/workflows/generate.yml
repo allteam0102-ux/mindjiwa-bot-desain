@@ -33,4 +33,5 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           STATUS_TYPE: ${{ secrets.STATUS_TYPE }}
           LOGO_URL: ${{ secrets.LOGO_URL }}
+          UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
         run: python main.py
