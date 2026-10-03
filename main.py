@@ -61,7 +61,7 @@ HEADLINE_FONT = os.environ.get("HEADLINE_FONT") or "Plus Jakarta Sans"
 SERIF_FONT    = os.environ.get("SERIF_FONT")    or "Playfair Display"
 BODY_FONT     = os.environ.get("BODY_FONT")     or "Plus Jakarta Sans"
 ARROW_TEXT    = os.environ.get("ARROW_TEXT")    or "→"
-STYLE_HINT    = os.environ.get("STYLE_HINT")    or "aesthetic minimal editorial european film tones soft natural light premium"
+STYLE_HINT    = os.environ.get("STYLE_HINT")    or "editorial lifestyle film"
 DEFAULT_THEME = (os.environ.get("DEFAULT_THEME") or "Krem").strip()
 
 CANVAS_W = int(os.environ.get("CANVAS_W") or 1080)
@@ -194,7 +194,8 @@ def get_title(props):
 # ======================================================================
 def split_slides(content_text):
     raw = (content_text or "").replace("\r\n", "\n").replace("\r", "\n")
-    blocks = re.split(r"(?m)^\s*---\s*$", raw)
+    # terima --- / — / –– dsb (Notion kadang mengubah --- jadi em-dash)
+    blocks = re.split(r"(?m)^\s*(?:[-–—]{2,}|[–—])\s*$", raw)
     return [b.strip() for b in blocks if b.strip()]
 
 URL_RE = re.compile(r"https?://\S+")
@@ -278,6 +279,14 @@ def fetch_image_bytes(url):
         )
     return r.content
 
+def _short_q(query, add_hint=True):
+    """Kata kunci dipendekin (maks 3 kata + 2 kata hint) -> hindari Pexels 500."""
+    words = (query or "").split()[:3]
+    q = " ".join(words) if words else "aesthetic calm"
+    if add_hint and STYLE_HINT:
+        q = (q + " " + " ".join(STYLE_HINT.split()[:2])).strip()
+    return q
+
 def pexels_pick(query, used_ids):
     def _search(q):
         r = requests.get("https://api.pexels.com/v1/search",
@@ -285,7 +294,7 @@ def pexels_pick(query, used_ids):
                          params={"query": q, "per_page": 15, "orientation": PEXELS_ORIENTATION}, timeout=60)
         r.raise_for_status()
         return r.json().get("photos", [])
-    photos = _search(f"{query} {STYLE_HINT}".strip()) or _search(query) or _search("aesthetic minimal calm")
+    photos = _search(_short_q(query)) or _search(_short_q(query, add_hint=False)) or _search("aesthetic minimal calm")
     if not photos:
         return None, None
     fresh = [p for p in photos if p.get("id") not in used_ids]
@@ -299,7 +308,7 @@ def pexels_pick(query, used_ids):
 def unsplash_pick(query, used_ids):
     r = requests.get("https://api.unsplash.com/search/photos",
                      headers={"Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"},
-                     params={"query": query, "per_page": 15, "orientation": PEXELS_ORIENTATION}, timeout=60)
+                     params={"query": _short_q(query), "per_page": 15, "orientation": PEXELS_ORIENTATION}, timeout=60)
     r.raise_for_status()
     results = r.json().get("results", [])
     if not results:
