@@ -1,0 +1,20 @@
+{
+  "preferences": {
+    "head_scale": 1.0,
+    "body_scale": 1.0,
+    "scrim": 1.0,
+    "soft": 0.0
+  },
+  "pending": {},
+  "resolved": [],
+  "awaiting_text": null,
+  "revise_queue": {},
+  "log": [],
+  "stats": {
+    "approved": 0,
+    "rejected": 0,
+    "weekly": []
+  },
+  "tg_offset": 0,
+  "_last_processed": 0
+}
