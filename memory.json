@@ -5,7 +5,14 @@
     "scrim": 1.0,
     "soft": 0.0
   },
-  "pending": {},
+  "pending": {
+    "6152a494": {
+      "title": "37. ROMANCE",
+      "page_id": "3e9d3753-c100-8010-b1e6-cfcf96b97f3f",
+      "ts": 1791734383,
+      "revision": 0
+    }
+  },
   "resolved": [],
   "awaiting_text": null,
   "revise_queue": {},
