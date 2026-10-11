@@ -223,6 +223,25 @@ def get_title(props):
             return _plain_text(p.get("title", [])).strip()
     return ""
 
+def read_first(props, names, kind):
+    """Coba beberapa nama kolom berurutan; kembalikan (nilai, nama_yg_kepakai)."""
+    for nm in names:
+        v = read_property(props, nm, kind)
+        if v and str(v).strip():
+            return v, nm
+    return "", ""
+
+def longest_rich_text(props):
+    """Fallback terakhir: ambil kolom rich_text TERPANJANG (biasanya = kolom isi konten),
+    biar bot tetap jalan walau nama kolomnya nggak dikenali."""
+    best, best_name = "", ""
+    for nm, p in props.items():
+        if isinstance(p, dict) and p.get("type") == "rich_text":
+            v = _plain_text(p.get("rich_text", [])).strip()
+            if len(v) > len(best):
+                best, best_name = v, nm
+    return best, best_name
+
 
 # ======================================================================
 # 3. PARSING ISI KONTEN
@@ -1243,17 +1262,27 @@ def process_page(page, workdir, mem=None, revision=None):
     props = page["properties"]
     page_id = page.get("id", "")
     title = get_title(props) or "Tanpa Judul"
-    fmt = read_property(props, FORMAT_PROPERTY, "select") or "Single Post"
-    content = read_property(props, CONTENT_PROPERTY, "rich_text")
-    keywords = read_property(props, KEYWORD_PROPERTY, "rich_text")
+    # --- baca kolom secara FLEKSIBEL (tahan ganti DB / beda nama kolom) ---
+    _fmt_names  = [FORMAT_PROPERTY, "Bentuk Konten", "Format"]
+    _cont_names = [CONTENT_PROPERTY, "Isi Konten", "Konten", "Content", "Isi", "Caption"]
+    _kw_names   = [KEYWORD_PROPERTY, "Kata Kunci Gambar", "Keyword"]
+    fmt = (read_first(props, _fmt_names, "select")[0]
+           or read_first(props, _fmt_names, "status")[0]
+           or read_first(props, _fmt_names, "rich_text")[0]
+           or "Single Post")
+    content, cname = read_first(props, _cont_names, "rich_text")
+    if not content.strip():
+        content, cname = longest_rich_text(props)   # fallback: kolom teks terpanjang
+    keywords = read_first(props, _kw_names, "rich_text")[0]
     theme = (read_property(props, THEME_PROPERTY, "select")
              or read_property(props, THEME_PROPERTY, "status")
              or DEFAULT_THEME)
     st = style_of(theme)
-    print(f"  [tema dibaca: '{theme}' -> style: {st['kind']}]")
+    print(f"  [tema dibaca: '{theme}' -> style: {st['kind']}] [kolom isi: '{cname or '-'}']")
 
     if not content.strip():
-        raise ValueError("Kolom 'Konten' kosong.")
+        raise ValueError("Kolom isi konten kosong / kolomnya tidak ketemu. "
+                         "Set secret CONTENT_PROPERTY ke nama kolom yang bener, atau isi kontennya.")
 
     is_single = "single" in fmt.lower()
     slide_blocks = split_slides(content)
