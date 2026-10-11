@@ -248,8 +248,8 @@ def longest_rich_text(props):
 # ======================================================================
 def split_slides(content_text):
     raw = (content_text or "").replace("\r\n", "\n").replace("\r", "\n")
-    # terima --- / — / –– dsb (Notion kadang mengubah --- jadi em-dash)
-    blocks = re.split(r"(?m)^\s*(?:[-–—]{2,}|[–—])\s*$", raw)
+    # Pemisah slide didukung: baris 'Slide 1/2/3...' ATAU baris '---' / dash.
+    blocks = re.split(r"(?mi)^\s*(?:slide\s*\d+\s*[:.)\-]?|[-–—]{2,}|[–—])\s*$", raw)
     return [b.strip() for b in blocks if b.strip()]
 
 URL_RE = re.compile(r"https?://\S+")
