@@ -2,32 +2,36 @@
   "preferences": {
     "head_scale": 1.0,
     "body_scale": 1.0,
-    "scrim": 1.0,
-    "soft": 0.0
+    "scrim": 1.1,
+    "soft": 0.13
   },
   "pending": {
-    "6152a494": {
+    "6ede4b8b": {
       "title": "37. ROMANCE",
       "page_id": "3e9d3753-c100-8010-b1e6-cfcf96b97f3f",
-      "ts": 1791734383,
-      "revision": 0
-    },
-    "76bfd5ae": {
-      "title": "37. ROMANCE",
-      "page_id": "3e9d3753-c100-8010-b1e6-cfcf96b97f3f",
-      "ts": 1791734729,
-      "revision": 0
+      "ts": 1791881576,
+      "revision": 1
     }
   },
-  "resolved": [],
+  "resolved": [
+    "76bfd5ae",
+    "6152a494"
+  ],
   "awaiting_text": null,
   "revise_queue": {},
-  "log": [],
+  "log": [
+    {
+      "ts": 1791881515,
+      "title": "37. ROMANCE",
+      "status": "rejected",
+      "reason": "Gambar kurang aesthetic"
+    }
+  ],
   "stats": {
     "approved": 0,
-    "rejected": 0,
+    "rejected": 2,
     "weekly": []
   },
-  "tg_offset": 0,
-  "_last_processed": 0
+  "tg_offset": 935382590,
+  "_last_processed": 2
 }
