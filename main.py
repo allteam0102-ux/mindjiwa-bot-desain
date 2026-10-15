@@ -32,6 +32,7 @@ import time
 import base64
 import random
 import secrets
+import shutil
 import tempfile
 import traceback
 
@@ -72,6 +73,7 @@ CANVAS_H = int(os.environ.get("CANVAS_H") or 1350)
 OUTPUT_PPTX = (os.environ.get("OUTPUT_PPTX") or "true").lower() == "true"
 OUTPUT_SVG  = (os.environ.get("OUTPUT_SVG")  or "true").lower() == "true"
 OUTPUT_SVG_PER_SLIDE = (os.environ.get("OUTPUT_SVG_PER_SLIDE") or "true").lower() == "true"
+OUTPUT_HTML = (os.environ.get("OUTPUT_HTML") or "true").lower() == "true"
 
 # ----------------------------------------------------------------------
 # SISTEM BELAJAR (memory + feedback). File memori disimpan di repo.
@@ -87,6 +89,26 @@ G_SOFT       = 0.0   # tambahan "film/soft" (inert di Mindjiwa)
 
 def _clamp(v, lo, hi):
     return max(lo, min(hi, v))
+
+# ----------------------------------------------------------------------
+# CACHE DESAIN (buat revisi per-slide: foto yg udah di-approve dipakai lagi)
+# ----------------------------------------------------------------------
+CACHE_DIR = os.environ.get("CACHE_DIR") or "design_cache"
+def _pid_norm(pid): return (pid or "").replace("-", "")
+def _page_cache_dir(pid):
+    d = os.path.join(CACHE_DIR, _pid_norm(pid)); os.makedirs(d, exist_ok=True); return d
+def _content_hash(s):
+    import hashlib; return hashlib.md5((s or "").encode("utf-8")).hexdigest()[:12]
+def _slide_nums_in(text):
+    # ambil nomor slide dari teks revisi, mis. "slide 2 dan 4" -> [2,4]
+    import re as _re
+    low = (text or "").lower(); nums = []
+    for mt in _re.finditer(r"slide\s*(\d{1,2})((?:\s*(?:,|dan|serta|&|/|\+)\s*\d{1,2})*)", low):
+        nums.append(int(mt.group(1))); nums += [int(x) for x in _re.findall(r"\d{1,2}", mt.group(2))]
+    seen, out = set(), []
+    for n in nums:
+        if n not in seen: seen.add(n); out.append(n)
+    return out
 
 # Ukuran teks DASAR tetap ditentukan per-TEMA lewat style_of() (head_size/body_size).
 # Knob sistem belajar cuma MENGALIKAN ukuran itu di titik pakai (pptx & svg), dengan
@@ -664,13 +686,15 @@ def _svg_rich(text, x0, y0, width, size, bold, font, color_hex, align="left", ga
             for xs, xe in runs(3):
                 out.append(f'<rect x="{int(xs)}" y="{int(baseline+size*0.14)}" '
                            f'width="{int(xe-xs)}" height="{max(3,int(size*0.09))}" fill="#{ACCENT_COLOR}"/>')
-            # teks
+            # teks: SATU <text> per baris (tiap kata = <tspan> berposisi) -> layer lebih sedikit di editor
+            spans = ""
             for (w, hl, it, ul, cc, ww), px in zip(vl, positions):
                 fill = INK if hl else color_hex
-                style = ' font-style="italic"' if it else ""
-                out.append(f'<text x="{int(px)}" y="{int(baseline)}"{style} '
-                           f'font-family="{_svg_escape(font)}, Arial, sans-serif" '
-                           f'font-size="{size}" font-weight="{weight}" fill="#{fill}">{_svg_escape(w)}</text>')
+                fstyle = "italic" if it else "normal"
+                spans += (f'<tspan x="{int(px)}" y="{int(baseline)}" font-style="{fstyle}" '
+                          f'fill="#{fill}">{_svg_escape(w)}</tspan>')
+            out.append(f'<text font-family="{_svg_escape(font)}, Arial, sans-serif" '
+                       f'font-size="{size}" font-weight="{weight}">{spans}</text>')
             y += int(size * gap)
     return "\n".join(out), y
 
@@ -774,6 +798,169 @@ def build_svg_single(slides_data, out_path, logo_path):
 
 
 # ======================================================================
+# 7b. HTML  (buat diedit lagi di Figma via plugin html.to.design -> text box asli)
+# ======================================================================
+def _html_rich_mj(text):
+    """Teks ber-marker -> HTML. ==stabilo== _miring_ ((lingkar)) ~garisbawah~. Baris baru -> <br>."""
+    def seg_html(s, hl, it, ul, circ):
+        esc = html.escape(s, quote=True)
+        cls = []
+        if hl: cls.append("hl")
+        if ul: cls.append("ul")
+        if circ: cls.append("circ")
+        inner = f"<em>{esc}</em>" if it else esc
+        if cls:
+            return f'<span class="{" ".join(cls)}">{inner}</span>'
+        return inner
+    out = []
+    for li, line in enumerate((text or "").split("\n")):
+        if li > 0:
+            out.append("<br>")
+        for p1 in re.split(r"(==.+?==)", line):
+            hl = len(p1) >= 4 and p1.startswith("==") and p1.endswith("==")
+            s1 = p1[2:-2] if hl else p1
+            if s1 == "": continue
+            for p2 in re.split(r"(\(\(.+?\)\))", s1):
+                circ = len(p2) >= 4 and p2.startswith("((") and p2.endswith("))")
+                s2 = p2[2:-2] if circ else p2
+                if s2 == "": continue
+                for p3 in re.split(r"(~[^~]+~)", s2):
+                    ul = len(p3) >= 2 and p3.startswith("~") and p3.endswith("~")
+                    s3 = p3[1:-1] if ul else p3
+                    if s3 == "": continue
+                    for p4 in re.split(r"(_[^_]+_)", s3):
+                        it = len(p4) >= 2 and p4.startswith("_") and p4.endswith("_")
+                        s4 = p4[1:-1] if it else p4
+                        if s4 == "": continue
+                        out.append(seg_html(s4, hl, it, ul, circ))
+    return "".join(out)
+
+def build_html(slides_data, out_path, logo_path):
+    total = len(slides_data)
+    logo_uri = None
+    if logo_path:
+        try:
+            im = Image.open(logo_path).convert("RGBA")
+            b = io.BytesIO(); im.save(b, "PNG")
+            logo_uri = "data:image/png;base64," + base64.b64encode(b.getvalue()).decode()
+        except Exception:
+            pass
+
+    css = f"""
+    * {{ margin:0; padding:0; box-sizing:border-box; }}
+    body {{ background:#555; font-family:'{HEADLINE_FONT}','Plus Jakarta Sans',Arial,sans-serif; }}
+    .wrap {{ display:flex; flex-direction:column; align-items:center; gap:28px; padding:28px; }}
+    .slide {{ position:relative; width:{CANVAS_W}px; height:{CANVAS_H}px; overflow:hidden; }}
+    /* FOTO (bersih) & MASKING overlay dipisah jadi layer sendiri-sendiri */
+    .photo-full {{ position:absolute; inset:0; }}
+    .photo-full img {{ width:100%; height:100%; object-fit:cover; display:block; }}
+    .ov-full {{ position:absolute; left:0; top:32%; width:100%; height:68%; background:rgba(0,0,0,.5); }}
+    .photo-frame {{ position:absolute; left:7%; top:11%; width:86%; height:34%;
+                    object-fit:cover; border-radius:28px; display:block; }}
+    .duo-cell {{ position:absolute; left:0; width:100%; height:50%; overflow:hidden; }}
+    .duo-cell img {{ width:100%; height:100%; object-fit:cover; display:block; }}
+    .duo-cell .ov {{ position:absolute; inset:0; background:rgba(0,0,0,.42); }}
+    .logo {{ position:absolute; left:6%; top:5%; height:5%; }}
+    .hashtag {{ position:absolute; right:6%; top:5.2%; color:#{ACCENT_COLOR};
+                font-weight:700; font-size:22px; }}
+    .quote {{ position:absolute; left:6%; top:12%; font-size:150px; line-height:1;
+              font-family:'{SERIF_FONT}',Georgia,serif; font-weight:700; color:#{ACCENT_COLOR}; }}
+    .tx {{ position:absolute; left:7%; width:86%; }}
+    .headline {{ font-weight:700; line-height:1.28; }}
+    .body {{ font-weight:400; line-height:1.38; }}
+    .duo-cap {{ position:absolute; left:7%; width:86%; color:#fff; font-weight:700;
+                font-size:{head_px(30)}px; line-height:1.28; z-index:3; }}
+    .footbar {{ position:absolute; left:6%; top:90.5%; width:6px; height:5%; background:#{ACCENT_COLOR}; }}
+    .footer {{ position:absolute; left:9%; top:90.5%; width:50%; font-weight:700; font-size:20px; }}
+    .arrow {{ position:absolute; right:7%; top:92%; font-weight:700; font-size:40px; }}
+    .hl {{ background:#{ACCENT_COLOR}; color:#{INK}; padding:.02em .12em; border-radius:.1em;
+           box-decoration-break:clone; -webkit-box-decoration-break:clone; }}
+    .ul {{ border-bottom:.10em solid #{ACCENT_COLOR}; }}
+    .circ {{ border:3px solid #{ACCENT_COLOR}; border-radius:50%; padding:.02em .35em; }}
+    em {{ font-style:italic; }}
+    """
+
+    def footer_html(foot):
+        return (f'<div class="footbar"></div>'
+                f'<div class="footer" style="color:#{foot}">{_html_rich_mj(FOOTER_TEXT)}</div>')
+
+    bp = ['<div class="wrap">']
+    for s in slides_data:
+        st = style_of(s["theme"])
+        bp.append(f'<div class="slide" style="background:#{st["bg"]}">')
+
+        if s.get("duo"):
+            panels = s.get("panels", [])
+            tops = [("0", panels[0] if len(panels) >= 1 else None, "30%"),
+                    ("50%", panels[1] if len(panels) >= 2 else None, "72%")]
+            for top, pnl, cap_top in tops:
+                if not pnl:
+                    continue
+                src = pnl.get("clean_path") or pnl.get("image_path")
+                bp.append(f'<div class="duo-cell" style="top:{top}">')
+                bp.append(f'<img src="{_img_data_uri(src)}" alt="">')
+                bp.append('<div class="ov"></div>')   # masking terpisah dari foto
+                bp.append('</div>')
+                if pnl.get("caption"):
+                    bp.append(f'<div class="duo-cap" style="top:{cap_top}">{_html_rich_mj(pnl["caption"])}</div>')
+            if logo_uri:
+                bp.append(f'<img class="logo" src="{logo_uri}" alt="">')
+            bp.append(f'<div class="hashtag">{html.escape(HASHTAG)}</div>')
+            bp.append(footer_html("FFFFFF"))
+            if total > 1:
+                bp.append('<div class="arrow" style="color:#FFFFFF">' + html.escape(ARROW_TEXT) + '</div>')
+            bp.append('</div>')
+            continue
+
+        # foto + masking (overlay) terpisah
+        if st["photo"] == "full" and s.get("image_path"):
+            bp.append('<div class="photo-full">')
+            bp.append(f'<img src="{_img_data_uri(s["image_path"])}" alt="">')
+            bp.append('<div class="ov-full"></div>')   # masking terpisah dari foto
+            bp.append('</div>')
+        elif st["photo"] == "frame" and s.get("image_path"):
+            bp.append(f'<img class="photo-frame" src="{_img_data_uri(s["image_path"])}" alt="">')
+
+        if logo_uri:
+            bp.append(f'<img class="logo" src="{logo_uri}" alt="">')
+        bp.append(f'<div class="hashtag">{html.escape(HASHTAG)}</div>')
+        if st["quote"]:
+            bp.append('<div class="quote">“</div>')
+
+        hfont = SERIF_FONT if st["serif"] else HEADLINE_FONT
+        talign = "center" if st["align"] == "center" else "left"
+        if s["headline"]:
+            bp.append(f'<div class="tx headline" style="top:{st["head_top"]*100:.1f}%;'
+                      f'font-family:\'{hfont}\',Georgia,serif;font-size:{head_px(st["head_size"])}px;'
+                      f'color:#{st["head"]};text-align:{talign}">{_html_rich_mj(s["headline"])}</div>')
+        if s["body"]:
+            bp.append(f'<div class="tx body" style="top:{st["body_top"]*100:.1f}%;'
+                      f'font-size:{body_px(st["body_size"])}px;color:#{st["body"]};'
+                      f'text-align:{talign}">{_html_rich_mj(s["body"])}</div>')
+
+        bp.append(footer_html(st["foot"]))
+        if total > 1:
+            bp.append(f'<div class="arrow" style="color:#{st["head"]}">{html.escape(ARROW_TEXT)}</div>')
+        bp.append('</div>')
+    bp.append('</div>')
+
+    fonts = ("https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,400;0,700;1,400;1,700"
+             "&family=Playfair+Display:ital,wght@0,400;0,700;1,700&display=swap")
+    doc = (
+        "<!doctype html><html lang=\"id\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+        "<link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">"
+        "<link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>"
+        f"<link href=\"{fonts}\" rel=\"stylesheet\">"
+        f"<title>{html.escape((slides_data[0].get('headline') if slides_data else 'Desain') or 'Desain')}</title>"
+        f"<style>{css}</style></head><body>" + "".join(bp) + "</body></html>"
+    )
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(doc)
+    return out_path
+
+
+# ======================================================================
 # 8. TELEGRAM
 # ======================================================================
 TG_BASE = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
@@ -859,6 +1046,7 @@ DEFAULT_MEMORY = {
     "log": [],            # riwayat {ts, title, status, reason}
     "stats": {"approved": 0, "rejected": 0, "weekly": []},
     "tg_offset": 0,
+    "design_cache": {},   # page_id_norm -> {hash, n, title, slides:{i:{...}}, ts}
 }
 
 MAX_REVISI = int(os.environ.get("MAX_REVISI") or 10)   # batas aman auto-revisi per konten
@@ -995,8 +1183,13 @@ Contoh yang HARUS "revise": "gambar kurang bagus", "kurang aesthetic", "ganti fo
 Kalau user komentarin/minta ganti foto, set action "revise" (foto otomatis diganti baru saat revisi).
 Pakai action "none" HANYA kalau pesan jelas cuma sapaan/basa-basi/terima kasih/pertanyaan umum
 (mis. "halo", "makasih", "lagi apa") — BUKAN komentar soal desain.
+PENTING soal FOTO: set "new_photo": true HANYA kalau user minta ganti/komentar jelek soal FOTO/GAMBAR
+(mis. "ganti foto", "fotonya jelek", "gambar kurang aesthetic", "cari gambar lain").
+Kalau user cuma soal TEKS/judul/overlay/warna (bukan foto), "new_photo": false (foto lama dipakai lagi).
+PENTING soal SLIDE: kalau user nyebut nomor slide (mis. "slide 2", "slide 1 dan 3"),
+isi "slides" dengan daftar nomor itu. Kalau nggak nyebut nomor, "slides": [] (artinya semua slide).
 Balas HANYA JSON valid, tanpa teks lain:
-{"head_scale_delta": <angka -0.12..0.12>, "body_scale_delta": <angka>, "scrim_delta": <angka>, "soft_delta": <angka>, "note": "<ringkasan singkat dalam bahasa Indonesia, maks 12 kata>", "action": "revise" atau "none"}
+{"head_scale_delta": <angka -0.12..0.12>, "body_scale_delta": <angka>, "scrim_delta": <angka>, "soft_delta": <angka>, "note": "<ringkasan singkat dalam bahasa Indonesia, maks 12 kata>", "action": "revise" atau "none", "new_photo": true/false, "slides": [<nomor slide>]}
 Pesan user: "%s" """
 
 def ai_parse_command(text):
@@ -1094,8 +1287,10 @@ def ai_vision_check(image_path, zone, theme):
         return None
     return {"ok": bool(data.get("ok", True)), "issue": str(data.get("issue") or "").strip()}
 
-def _queue_revision(mem, rec, reason_label):
-    """Masukkan konten ke antrian revisi (biar run berikutnya di-generate ulang)."""
+def _queue_revision(mem, rec, reason_label, new_photo=False, slides=None):
+    """Masukkan konten ke antrian revisi (biar run berikutnya di-generate ulang).
+    new_photo=True -> foto dicari baru; False -> foto lama (cache) dipakai lagi.
+    slides=[nomor] -> hanya slide itu yg direvisi; []/None = semua slide."""
     page_id = ((rec or {}).get("page_id") or "").replace("-", "")   # normalisasi kunci
     if not page_id:
         return False
@@ -1106,6 +1301,18 @@ def _queue_revision(mem, rec, reason_label):
     entry["revision"] = rev + 1
     entry["reasons"].append(reason_label)
     entry["reasons"] = entry["reasons"][-8:]
+    # gabung flag "foto baru": sekali minta foto baru -> tetap foto baru
+    entry["new_photo"] = bool(entry.get("new_photo", False)) or bool(new_photo)
+    # gabung target slide: kalau salah satu minta "semua" ([]) -> jadi semua
+    new = [int(x) for x in (slides or [])]
+    if "slides" not in entry:
+        entry["slides"] = new
+    else:
+        old = entry.get("slides") or []
+        if old == [] or new == []:
+            entry["slides"] = []
+        else:
+            entry["slides"] = sorted(set(old) | set(new))
     q[page_id] = entry
     return True
 
@@ -1161,15 +1368,24 @@ def process_feedback(mem):
                     continue
                 note = (data or {}).get("note") or text[:80]
                 ch = apply_ai(prefs, data) if data else []
+                # foto baru? -> kalau AI bilang new_photo, atau teksnya jelas soal ganti/komentar foto
+                _photo_kata = ("foto", "gambar", "fotonya", "gambarnya", "aesthetic",
+                               "jelek", "buram", "norak", "cari gambar", "ganti foto")
+                _said_photo = any(k in low for k in _photo_kata)
+                new_photo = bool((data or {}).get("new_photo")) or (data is None and _said_photo) or (_said_photo and ("ganti" in low or "jelek" in low or "aesthetic" in low or "lain" in low))
+                slides = (data or {}).get("slides") or _slide_nums_in(text)
                 latest = _latest_pending(mem)
                 if latest:
                     tok, rec = latest
-                    _queue_revision(mem, rec, "chat: " + note)
+                    _queue_revision(mem, rec, "chat: " + note, new_photo=new_photo, slides=slides)
                     mem["pending"].pop(tok, None); _mark_resolved(mem, tok)
                     mem["stats"]["rejected"] += 1
                     extra = ("\n" + prefs_summary(prefs)) if ch else ""
-                    tail = "" if data else " (AI lagi nggak aktif, jadi gw revisi dgn foto baru aja)"
-                    tg_message(f"🧠 Paham: {note}. Gw revisi '{rec.get('title','desain')}' ya{tail}.{extra}")
+                    tail = "" if data else " (AI lagi nggak aktif)"
+                    seg = ("foto baru" if new_photo else "foto lama dipakai lagi")
+                    if slides:
+                        seg += f", cuma slide {', '.join(str(x) for x in slides)}"
+                    tg_message(f"🧠 Paham: {note}. Gw revisi '{rec.get('title','desain')}' ya ({seg}){tail}.{extra}")
                 else:
                     if ch:
                         tg_message(f"🧠 Paham: {note}. Setelan disesuaikan, kepakai di desain berikutnya.\n{prefs_summary(prefs)}")
@@ -1223,7 +1439,8 @@ def process_feedback(mem):
                 desc = apply_reason(prefs, code)
                 mem["pending"].pop(tok, None)
                 _mark_resolved(mem, tok); processed += 1
-                ok = _queue_revision(mem, rec, REASON_LABEL.get(code, code))
+                ok = _queue_revision(mem, rec, REASON_LABEL.get(code, code),
+                                     new_photo=(code == "img"), slides=[])
                 print(f"  reject({code}) pid={rec.get('page_id')} queued={ok}")
                 mem["log"].append({"ts": int(time.time()), "title": rec["title"],
                                    "status": "rejected", "reason": REASON_LABEL.get(code, code)})
@@ -1301,6 +1518,30 @@ def process_page(page, workdir, mem=None, revision=None):
     vision_notes = []           # catatan cek mandiri (AI vision) — cuma cover
     used_ids = set()
     total = len(slide_blocks)
+
+    # --- REUSE CACHE: pas revisi, foto yg udah di-approve dipakai lagi (per slide) ---
+    pid_norm = _pid_norm(page_id)
+    content_hash = _content_hash(content)
+    rev_reuse = None
+    if revision is not None and mem is not None:
+        cached = (mem.get("design_cache") or {}).get(pid_norm)
+        if cached and cached.get("hash") == content_hash and int(cached.get("n", 0)) == total:
+            rev_reuse = {
+                "new_photo": bool(revision.get("new_photo", False)),
+                "slides": [int(x) for x in (revision.get("slides") or [])],
+                "dir": _page_cache_dir(page_id),
+            }
+            tgt = rev_reuse["slides"] or "semua"
+            print(f"  [reuse] cache cocok (hash={content_hash}) foto_baru={rev_reuse['new_photo']} target={tgt}")
+    cdir = _page_cache_dir(page_id) if (mem is not None and page_id) else None
+    slide_cache = {}
+
+    def _reuse_ok(i):
+        if rev_reuse is None:
+            return False
+        targeted = (not rev_reuse["slides"]) or (i in rev_reuse["slides"])
+        return not (rev_reuse["new_photo"] and targeted)
+
     for i, block in enumerate(slide_blocks, start=1):
         # ---- Style DUO: 2 foto ditumpuk + caption (panel dipisah '///') ----
         if st["kind"] == "duo":
@@ -1308,27 +1549,47 @@ def process_page(page, workdir, mem=None, revision=None):
             if not panels_raw:
                 raise ValueError(f"Slide {i} (Duo) kosong. Format: URL1 + caption /// URL2 + caption.")
             panels = []
-            for pnl in panels_raw:
+            reuse = _reuse_ok(i)
+            for pj, pnl in enumerate(panels_raw, start=1):
                 purl, pclean = extract_url_from_block(pnl)
                 cap = pclean.strip()
-                if purl:
-                    pim = Image.open(io.BytesIO(fetch_image_bytes(purl))).convert("RGB")
+                ppath = os.path.join(workdir, f"slide_{i}_{pj}.png")
+                ppath_clean = os.path.join(workdir, f"slide_{i}_{pj}_clean.png")
+                cpath = os.path.join(rev_reuse["dir"], f"slide_{i}_{pj}.png") if rev_reuse else None
+                cpath_clean = os.path.join(rev_reuse["dir"], f"slide_{i}_{pj}_clean.png") if rev_reuse else None
+                if reuse and cpath and os.path.exists(cpath):
+                    shutil.copyfile(cpath, ppath)
+                    if os.path.exists(cpath_clean):
+                        shutil.copyfile(cpath_clean, ppath_clean)
+                    print(f"    slide {i} panel {pj}: foto lama (cache) dipakai lagi")
                 else:
-                    q = keyword_for(0, [], cap, "")
-                    data, credit = image_pick(q, used_ids)
-                    if data:
-                        pim = Image.open(io.BytesIO(data)).convert("RGB")
-                        if credit:
-                            credits.append(f"Slide {i}: {credit}")
+                    if purl:
+                        pim = Image.open(io.BytesIO(fetch_image_bytes(purl))).convert("RGB")
                     else:
-                        pim = make_placeholder()
-                    if credit:
-                        credits.append(f"Slide {i}: {credit}")
-                pim = darken(crop_to(pim, CANVAS_W, int(0.5 * CANVAS_H)), 0.42)
-                ppath = os.path.join(workdir, f"slide_{i}_{len(panels)+1}.png")
-                pim.save(ppath, "PNG")
+                        q = keyword_for(0, [], cap, "")
+                        data, credit = image_pick(q, used_ids)
+                        if data:
+                            pim = Image.open(io.BytesIO(data)).convert("RGB")
+                            if credit:
+                                credits.append(f"Slide {i}: {credit}")
+                        else:
+                            pim = make_placeholder()
+                    base = crop_to(pim, CANVAS_W, int(0.5 * CANVAS_H))
+                    base.save(ppath_clean, "PNG")            # bersih (buat html + overlay terpisah)
+                    darken(base, 0.42).save(ppath, "PNG")    # versi gelap (buat svg/pptx/preview)
+                if cdir:
+                    try:
+                        shutil.copyfile(ppath, os.path.join(cdir, f"slide_{i}_{pj}.png"))
+                        if os.path.exists(ppath_clean):
+                            shutil.copyfile(ppath_clean, os.path.join(cdir, f"slide_{i}_{pj}_clean.png"))
+                    except Exception as _e:
+                        print("    ! cache simpan gagal:", _e)
                 preview_paths.append(ppath)
-                panels.append({"image_path": ppath, "caption": cap})
+                panels.append({"image_path": ppath,
+                               "clean_path": (ppath_clean if os.path.exists(ppath_clean) else None),
+                               "caption": cap})
+            if cdir is not None:
+                slide_cache[str(i)] = {"kind": "duo", "theme": theme}
             slides_data.append({"duo": True, "panels": panels, "headline": "", "body": "",
                                 "image_path": None, "index": i, "total": total, "theme": theme})
             continue
@@ -1338,36 +1599,55 @@ def process_page(page, workdir, mem=None, revision=None):
 
         img_path = None
         if st["photo"] != "none":
-            if inline_url:
-                im = Image.open(io.BytesIO(fetch_image_bytes(inline_url))).convert("RGB")
-            else:
-                explicit = keyword_blocks[i - 1].strip() if (i - 1) < len(keyword_blocks) else ""
-                if explicit:
-                    q = keyword_for(i - 1, keyword_blocks, headline, body)
-                elif ai_kws and (i - 1) < len(ai_kws) and ai_kws[i - 1].strip():
-                    q = ai_kws[i - 1].strip()          # kata kunci FOTO dari AI (Inggris)
-                else:
-                    q = keyword_for(i - 1, keyword_blocks, headline, body)
-                data, credit = image_pick(q, used_ids)
-                if data:
-                    im = Image.open(io.BytesIO(data)).convert("RGB")
-                    if credit:
-                        credits.append(f"Slide {i}: {credit}")
-                else:
-                    im = make_placeholder()
-                    credits.append(f"Slide {i}: (background netral — gambar '{q}' tak ditemukan)")
-            if st["photo"] == "frame":
-                im = crop_to(im, int(0.86 * CANVAS_W), int(0.34 * CANVAS_H))
-            else:
-                im = crop_to(im, CANVAS_W, CANVAS_H)
-            if is_single:
-                im = pencil_sketch(im)
             img_path = os.path.join(workdir, f"slide_{i}.png")
-            im.save(img_path, "PNG")
+            cpath = os.path.join(rev_reuse["dir"], f"slide_{i}.png") if rev_reuse else None
+            if _reuse_ok(i) and cpath and os.path.exists(cpath):
+                shutil.copyfile(cpath, img_path)          # foto lama dipakai lagi
+                print(f"    slide {i}: foto lama (cache) dipakai lagi")
+            else:
+                if inline_url:
+                    im = Image.open(io.BytesIO(fetch_image_bytes(inline_url))).convert("RGB")
+                else:
+                    explicit = keyword_blocks[i - 1].strip() if (i - 1) < len(keyword_blocks) else ""
+                    if explicit:
+                        q = keyword_for(i - 1, keyword_blocks, headline, body)
+                    elif ai_kws and (i - 1) < len(ai_kws) and ai_kws[i - 1].strip():
+                        q = ai_kws[i - 1].strip()          # kata kunci FOTO dari AI (Inggris)
+                    else:
+                        q = keyword_for(i - 1, keyword_blocks, headline, body)
+                    data, credit = image_pick(q, used_ids)
+                    if data:
+                        im = Image.open(io.BytesIO(data)).convert("RGB")
+                        if credit:
+                            credits.append(f"Slide {i}: {credit}")
+                    else:
+                        im = make_placeholder()
+                        credits.append(f"Slide {i}: (background netral — gambar '{q}' tak ditemukan)")
+                if st["photo"] == "frame":
+                    im = crop_to(im, int(0.86 * CANVAS_W), int(0.34 * CANVAS_H))
+                else:
+                    im = crop_to(im, CANVAS_W, CANVAS_H)
+                if is_single:
+                    im = pencil_sketch(im)
+                im.save(img_path, "PNG")
+            # img_path (full/frame) SUDAH bersih -> overlay di svg/html jadi layer terpisah
+            if cdir:
+                try:
+                    shutil.copyfile(img_path, os.path.join(cdir, f"slide_{i}.png"))
+                except Exception as _e:
+                    print("    ! cache simpan gagal:", _e)
             preview_paths.append(img_path)
 
+        if cdir is not None:
+            slide_cache[str(i)] = {"kind": st["kind"], "theme": theme}
         slides_data.append({"headline": headline, "body": body, "image_path": img_path,
                             "index": i, "total": total, "theme": theme})
+
+    # catat metadata cache (buat cek kecocokan di revisi berikutnya)
+    if mem is not None and page_id:
+        mem.setdefault("design_cache", {})[pid_norm] = {
+            "hash": content_hash, "n": total, "title": title,
+            "slides": slide_cache, "ts": int(time.time())}
 
     # --- CEK MANDIRI (AI vision) — CUKUP slide COVER biar hemat kuota gratis Gemini ---
     cover_img = next((s.get("image_path") for s in slides_data if s.get("image_path")), None)
@@ -1436,6 +1716,15 @@ def process_page(page, workdir, mem=None, revision=None):
             build_svg_single([s], sp, logo_path)
             if not tg_document(sp, caption=f"{title} — slide {s['index']}/{total} (.svg per slide)"):
                 tg_message(f"⚠️ SVG slide {s['index']} gagal dikirim (cek log).")
+
+    if OUTPUT_HTML:
+        html_path = os.path.join(workdir, f"{safe_name}.html")
+        build_html(slides_data, html_path, logo_path)
+        cap = (f"{title} — .html (teks jadi paragraf rapih, masking foto terpisah).\n"
+               "Edit di Figma: pakai plugin html.to.design → Import → upload file ini. "
+               "Teks jadi text box asli (bukan per-baris).")
+        if not tg_document(html_path, caption=cap):
+            tg_message("⚠️ File .html gagal dikirim (cek log).")
 
     # ---- tombol penilaian (1x pencet langsung selesai) utk sistem belajar ----
     if LEARN_ENABLED and mem is not None:
