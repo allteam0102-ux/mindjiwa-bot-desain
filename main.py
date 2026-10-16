@@ -37,7 +37,7 @@ import tempfile
 import traceback
 
 import requests
-from PIL import Image, ImageOps, ImageFilter
+from PIL import Image, ImageOps, ImageFilter, ImageDraw
 from pptx import Presentation
 from pptx.util import Emu, Pt
 from pptx.dml.color import RGBColor
@@ -538,6 +538,29 @@ def _add_rich(slide, left, top, width, height, text, size_pt, bold, font, color_
                 f.color.rgb = hex_rgb(color_hex)
     return box
 
+_SCRIM_CACHE = {}
+def _scrim_png():
+    """Bikin (sekali) PNG gradasi hitam transparan->gelap buat masking halus di PPTX."""
+    key = (CANVAS_W, CANVAS_H)
+    if key in _SCRIM_CACHE and os.path.exists(_SCRIM_CACHE[key]):
+        return _SCRIM_CACHE[key]
+    stops = [(0.0, 0.15), (0.35, 0.25), (0.65, 0.6), (1.0, 0.9)]
+    def op_at(t):
+        for i in range(len(stops) - 1):
+            t0, a0 = stops[i]; t1, a1 = stops[i + 1]
+            if t <= t1:
+                f = (t - t0) / (t1 - t0) if t1 > t0 else 0
+                return int(255 * (a0 + (a1 - a0) * f))
+        return int(255 * stops[-1][1])
+    ov = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(ov)
+    for y in range(CANVAS_H):
+        d.line([(0, y), (CANVAS_W, y)], fill=(0, 0, 0, op_at(y / CANVAS_H)))
+    path = os.path.join(tempfile.gettempdir(), f"scrim_{CANVAS_W}x{CANVAS_H}.png")
+    ov.save(path, "PNG")
+    _SCRIM_CACHE[key] = path
+    return path
+
 def build_pptx(slides_data, out_path, logo_path):
     prs = Presentation()
     prs.slide_width = Emu(EMU_W)
@@ -578,6 +601,10 @@ def build_pptx(slides_data, out_path, logo_path):
 
         if st["photo"] == "full" and s.get("image_path"):
             slide.shapes.add_picture(s["image_path"], 0, 0, width=prs.slide_width, height=prs.slide_height)
+            try:   # masking gradasi halus di atas foto
+                slide.shapes.add_picture(_scrim_png(), 0, 0, width=prs.slide_width, height=prs.slide_height)
+            except Exception as _e:
+                print("    ! scrim pptx gagal:", _e)
         elif st["photo"] == "frame" and s.get("image_path"):
             slide.shapes.add_picture(s["image_path"], fx(0.07), fy(0.11), width=fx(0.86), height=fy(0.34))
 
@@ -752,8 +779,16 @@ def build_svg_single(slides_data, out_path, logo_path):
         if st["photo"] == "full" and s.get("image_path"):
             parts.append(f'<image x="{xo}" y="0" width="{CANVAS_W}" height="{H}" '
                          f'preserveAspectRatio="xMidYMid slice" href="{_img_data_uri(s["image_path"])}"/>')
-            parts.append(f'<rect x="{xo}" y="{int(0.32*H)}" width="{CANVAS_W}" height="{int(0.68*H)}" '
-                         f'fill="#000000" opacity="0.5"/>')
+            # masking GRADASI HALUS (terang di atas -> gelap di bawah tempat teks)
+            gid = f"ovg{idx}"
+            parts.append(
+                f'<defs><linearGradient id="{gid}" x1="0" y1="0" x2="0" y2="1">'
+                f'<stop offset="0%" stop-color="#000000" stop-opacity="0.15"/>'
+                f'<stop offset="35%" stop-color="#000000" stop-opacity="0.25"/>'
+                f'<stop offset="65%" stop-color="#000000" stop-opacity="0.6"/>'
+                f'<stop offset="100%" stop-color="#000000" stop-opacity="0.9"/>'
+                f'</linearGradient></defs>')
+            parts.append(f'<rect x="{xo}" y="0" width="{CANVAS_W}" height="{H}" fill="url(#{gid})"/>')
         elif st["photo"] == "frame" and s.get("image_path"):
             fx0 = xo + int(0.07*CANVAS_W); fy0 = int(0.11*H)
             fw = int(0.86*CANVAS_W); fh = int(0.34*H)
@@ -854,7 +889,8 @@ def build_html(slides_data, out_path, logo_path):
     /* FOTO (bersih) & MASKING overlay dipisah jadi layer sendiri-sendiri */
     .photo-full {{ position:absolute; inset:0; }}
     .photo-full img {{ width:100%; height:100%; object-fit:cover; display:block; }}
-    .ov-full {{ position:absolute; left:0; top:32%; width:100%; height:68%; background:rgba(0,0,0,.5); }}
+    .ov-full {{ position:absolute; inset:0; background:linear-gradient(to bottom,
+                 rgba(0,0,0,.15) 0%, rgba(0,0,0,.25) 35%, rgba(0,0,0,.6) 65%, rgba(0,0,0,.9) 100%); }}
     .photo-frame {{ position:absolute; left:7%; top:11%; width:86%; height:34%;
                     object-fit:cover; border-radius:28px; display:block; }}
     .duo-cell {{ position:absolute; left:0; width:100%; height:50%; overflow:hidden; }}
