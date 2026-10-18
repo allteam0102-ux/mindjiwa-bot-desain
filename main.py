@@ -134,6 +134,11 @@ PEXELS_API_KEY      = env("PEXELS_API_KEY", required=True)
 TELEGRAM_BOT_TOKEN  = env("TELEGRAM_BOT_TOKEN", required=True)
 TELEGRAM_CHAT_ID    = env("TELEGRAM_CHAT_ID", required=True)
 UNSPLASH_ACCESS_KEY = os.environ.get("UNSPLASH_ACCESS_KEY", "")   # opsional
+# SUMBER PRIBADI: ambil dari koleksi/like akun sendiri dulu (isi ID collection / username). Kosong = fitur mati.
+UNSPLASH_COLLECTIONS = (os.environ.get("UNSPLASH_COLLECTIONS") or "").strip()
+UNSPLASH_LIKES_USER  = (os.environ.get("UNSPLASH_LIKES_USER") or "").strip()   # username Unsplash -> ambil dari foto yg di-Like (❤️)
+PEXELS_COLLECTIONS   = (os.environ.get("PEXELS_COLLECTIONS") or "").strip()
+PERSONAL_IMAGES_ONLY = (os.environ.get("PERSONAL_IMAGES_ONLY") or "false").lower() == "true"
 
 TITLE_PROPERTY   = env("TITLE_PROPERTY", "Judul")
 STATUS_PROPERTY  = env("STATUS_PROPERTY", "Status")
@@ -399,9 +404,129 @@ def unsplash_pick(query, used_ids):
     name = (photo.get("user") or {}).get("name", "-")
     return requests.get(img_url, timeout=60).content, f"Foto: {name} (Unsplash)"
 
+def _unsplash_collection_random(used_ids):
+    """Ambil foto ACAK dari collection(s) Unsplash milik user (tanpa keyword)."""
+    ids = [c.strip() for c in UNSPLASH_COLLECTIONS.split(",") if c.strip()]
+    random.shuffle(ids)
+    for cid in ids:
+        try:
+            r = requests.get(f"https://api.unsplash.com/collections/{cid}/photos",
+                             headers={"Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"},
+                             params={"per_page": 30, "orientation": PEXELS_ORIENTATION}, timeout=60)
+            if r.status_code != 200:
+                print(f"    ! Unsplash collection {cid} {r.status_code}"); continue
+            results = r.json()
+            if not isinstance(results, list) or not results:
+                continue
+            fresh = [p for p in results if p.get("id") not in used_ids] or results
+            photo = random.choice(fresh)
+            if photo.get("id"): used_ids.add(photo["id"])
+            urls = photo.get("urls", {})
+            img_url = urls.get("regular") or urls.get("full") or urls.get("raw")
+            name = (photo.get("user") or {}).get("name", "-")
+            return requests.get(img_url, timeout=60).content, f"Foto: {name} (Unsplash, koleksi kamu)"
+        except Exception as e:
+            print(f"    ! Unsplash collection {cid} gagal:", e)
+    return None, None
+
+def unsplash_pick_collection(query, used_ids):
+    """Cari foto RELEVAN di dalam collection user (keyword match); kalau nggak ada -> acak dari collection."""
+    try:
+        r = requests.get("https://api.unsplash.com/search/photos",
+                         headers={"Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"},
+                         params={"query": _short_q(query, add_hint=False), "per_page": 15,
+                                 "orientation": PEXELS_ORIENTATION,
+                                 "collections": UNSPLASH_COLLECTIONS}, timeout=60)
+        if r.status_code == 200:
+            results = r.json().get("results", [])
+            fresh = [p for p in results if p.get("id") not in used_ids] or results
+            if fresh:
+                photo = random.choice(fresh[:8])
+                if photo.get("id"): used_ids.add(photo["id"])
+                urls = photo.get("urls", {})
+                img_url = urls.get("regular") or urls.get("full") or urls.get("raw")
+                name = (photo.get("user") or {}).get("name", "-")
+                return requests.get(img_url, timeout=60).content, f"Foto: {name} (Unsplash, koleksi kamu)"
+        else:
+            print(f"    ! Unsplash collection search {r.status_code}")
+    except Exception as e:
+        print("    ! Unsplash collection search gagal:", e)
+    return _unsplash_collection_random(used_ids)
+
+def unsplash_pick_likes(used_ids):
+    """Ambil foto dari LIKES (❤️) akun Unsplash user (acak). Publik, cuma butuh username."""
+    if not (UNSPLASH_LIKES_USER and UNSPLASH_ACCESS_KEY):
+        return None, None
+    for page in (random.randint(1, 3), 1):
+        try:
+            r = requests.get(f"https://api.unsplash.com/users/{UNSPLASH_LIKES_USER}/likes",
+                             headers={"Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"},
+                             params={"per_page": 30, "page": page, "orientation": PEXELS_ORIENTATION}, timeout=60)
+            if r.status_code != 200:
+                print(f"    ! Unsplash likes {r.status_code}"); continue
+            results = r.json()
+            if not isinstance(results, list) or not results:
+                continue
+            fresh = [p for p in results if p.get("id") not in used_ids] or results
+            photo = random.choice(fresh)
+            if photo.get("id"): used_ids.add(photo["id"])
+            urls = photo.get("urls", {})
+            img_url = urls.get("regular") or urls.get("full") or urls.get("raw")
+            name = (photo.get("user") or {}).get("name", "-")
+            return requests.get(img_url, timeout=60).content, f"Foto: {name} (Unsplash, like kamu)"
+        except Exception as e:
+            print("    ! Unsplash likes gagal:", e)
+    return None, None
+
+def pexels_pick_collection(query, used_ids):
+    """Ambil foto dari collection(s) Pexels milik user (acak, hindari yg udah kepake)."""
+    ids = [c.strip() for c in PEXELS_COLLECTIONS.split(",") if c.strip()]
+    random.shuffle(ids)
+    for cid in ids:
+        try:
+            r = requests.get(f"https://api.pexels.com/v1/collections/{cid}",
+                             headers={"Authorization": PEXELS_API_KEY},
+                             params={"per_page": 80, "type": "photos"}, timeout=60)
+            if r.status_code != 200:
+                print(f"    ! Pexels collection {cid} {r.status_code}"); continue
+            media = [m for m in r.json().get("media", []) if (m.get("type") or "").lower() == "photo"]
+            if not media:
+                continue
+            fresh = [m for m in media if m.get("id") not in used_ids] or media
+            photo = random.choice(fresh)
+            if photo.get("id"): used_ids.add(photo["id"])
+            src = photo.get("src", {})
+            img_url = src.get("large2x") or src.get("large") or src.get("original")
+            if not img_url:
+                continue
+            return requests.get(img_url, timeout=60).content, f'Foto: {photo.get("photographer","-")} (Pexels, koleksi kamu)'
+        except Exception as e:
+            print(f"    ! Pexels collection {cid} gagal:", e)
+    return None, None
+
 def image_pick(query, used_ids):
-    """Ambil gambar: Unsplash dulu (utama), Pexels cadangan.
-    Kalau kata kunci tak dapat gambar, coba kata kunci cadangan Inggris."""
+    """Sumber PRIBADI (koleksi/like akun user) dulu, baru internet umum sebagai cadangan."""
+    if UNSPLASH_COLLECTIONS and UNSPLASH_ACCESS_KEY:
+        try:
+            data, credit = unsplash_pick_collection(query, used_ids)
+            if data: return data, credit
+        except Exception as e:
+            print("    ! sumber Unsplash collection gagal:", e)
+    if UNSPLASH_LIKES_USER and UNSPLASH_ACCESS_KEY:
+        try:
+            data, credit = unsplash_pick_likes(used_ids)
+            if data: return data, credit
+        except Exception as e:
+            print("    ! sumber Unsplash likes gagal:", e)
+    if PEXELS_COLLECTIONS:
+        try:
+            data, credit = pexels_pick_collection(query, used_ids)
+            if data: return data, credit
+        except Exception as e:
+            print("    ! sumber Pexels pribadi gagal:", e)
+    if PERSONAL_IMAGES_ONLY and (UNSPLASH_COLLECTIONS or UNSPLASH_LIKES_USER or PEXELS_COLLECTIONS):
+        return None, None
+    # CADANGAN: internet umum (perilaku lama)
     sources = (["unsplash", "pexels"] if UNSPLASH_ACCESS_KEY else ["pexels"])
     queries = [query, "calm aesthetic minimal lifestyle", "soft natural light nature"]
     for q in queries:
@@ -433,6 +558,80 @@ def crop_to(im, w, h):
     else:
         nh = int(iw / target); y = (ih - nh) // 2; im = im.crop((0, y, iw, y + nh))
     return im.resize((w, h), Image.LANCZOS)
+
+# ---- AUTO-CROP CERDAS (full-AI): crop ke bagian foto yg paling nyambung konteks slide ----
+SMART_CROP_ENABLED = (os.environ.get("SMART_CROP") or "true").lower() == "true"
+
+def _box_crop_wh(im, box_px, w, h):
+    """Crop im jadi rasio w:h, se-ketat mungkin TAPI wajib memuat box_px (x0,y0,x1,y1)."""
+    target = w / h
+    W, H = im.size
+    bx0, by0, bx1, by1 = box_px
+    bw = max(1.0, bx1 - bx0); bh = max(1.0, by1 - by0)
+    cx = (bx0 + bx1) / 2.0; cy = (by0 + by1) / 2.0
+    cw = max(bw, bh * target); ch = cw / target
+    if ch < bh:
+        ch = bh; cw = ch * target
+    cw = min(cw, W); ch = min(ch, H)
+    if cw / ch > target:
+        cw = ch * target
+    else:
+        ch = cw / target
+    x0 = cx - cw / 2.0; y0 = cy - ch / 2.0
+    x0 = max(0, min(W - cw, x0)); y0 = max(0, min(H - ch, y0))
+    im2 = im.crop((int(round(x0)), int(round(y0)), int(round(x0 + cw)), int(round(y0 + ch))))
+    return im2.resize((w, h), Image.LANCZOS)
+
+def ai_focus_box(image_path, context):
+    """Tanya MATA AI: bagian foto mana yg PALING nyambung sama konteks slide. (x,y,w,h) fraksi atau None."""
+    if not (GROQ_API_KEY or GEMINI_API_KEY):
+        return None
+    prompt = (
+        "Kamu fotografer/editor. Ini satu FOTO untuk konten Instagram.\n"
+        f"Konteks/topik slide: \"{(context or '').strip()[:200]}\".\n"
+        "Tentukan KOTAK bagian foto yang PALING relevan & penting untuk konteks ini "
+        "(boleh objek/subjek yang paling nyambung dengan topik, BUKAN selalu yang paling menonjol). "
+        "Jaga wajah/objek penting tetap utuh (jangan kepotong).\n"
+        "Nilai dalam FRAKSI 0..1 relatif ukuran foto: x,y = pojok kiri-atas kotak; w,h = lebar,tinggi.\n"
+        'Balas HANYA JSON: {"x":<0..1>,"y":<0..1>,"w":<0..1>,"h":<0..1>}'
+    )
+    d = vision_json(prompt, image_path)
+    try:
+        x = float(d["x"]); y = float(d["y"]); w = float(d["w"]); h = float(d["h"])
+    except Exception:
+        return None
+    if not (0 <= x <= 1 and 0 <= y <= 1 and 0 < w <= 1 and 0 < h <= 1):
+        return None
+    if x + w > 1: w = 1 - x
+    if y + h > 1: h = 1 - y
+    return (x, y, w, h)
+
+def smart_crop_to(im, w, h, context=""):
+    """Crop ke (w,h). SMART_CROP aktif + ada konteks -> crop sesuai AI; gagal/mati -> crop tengah biasa.
+    Balikin (image, berhasil_smartcrop_bool)."""
+    if SMART_CROP_ENABLED and context and (GROQ_API_KEY or GEMINI_API_KEY):
+        tmp = None
+        try:
+            fd, tmp = tempfile.mkstemp(suffix=".jpg"); os.close(fd)
+            im.convert("RGB").save(tmp, "JPEG", quality=88)
+            box = ai_focus_box(tmp, context)
+            if box:
+                W, H = im.size
+                x, y, bw, bh = box
+                pad = 0.10
+                bx0 = max(0, (x - pad) * W); by0 = max(0, (y - pad) * H)
+                bx1 = min(W, (x + bw + pad) * W); by1 = min(H, (y + bh + pad) * H)
+                if bx1 - bx0 >= 8 and by1 - by0 >= 8:
+                    print(f"    [smart-crop] fokus box={tuple(round(v, 2) for v in box)}")
+                    return _box_crop_wh(im, (bx0, by0, bx1, by1), w, h), True
+        except Exception as e:
+            print("    ! smart-crop gagal, pakai crop tengah:", e)
+        finally:
+            try:
+                if tmp and os.path.exists(tmp): os.remove(tmp)
+            except Exception:
+                pass
+    return crop_to(im, w, h), False
 
 def pencil_sketch(im):
     import numpy as np
@@ -1173,9 +1372,11 @@ GROQ_API_KEY    = os.environ.get("GROQ_API_KEY", "")
 GROQ_MODEL      = os.environ.get("GROQ_MODEL") or "openai/gpt-oss-20b"
 AI_CHAT_ENABLED = ((os.environ.get("AI_CHAT_ENABLED") or "true").lower() == "true"
                    and (bool(GEMINI_API_KEY) or bool(GROQ_API_KEY)))
-# cek mandiri pakai 'mata' AI (Gemini vision). gratis (gambar sbg INPUT), cuma butuh Gemini key.
+# cek mandiri pakai 'mata' AI (Groq/Gemini vision). aktif kalau salah satu key ada.
 VISION_CHECK_ENABLED = ((os.environ.get("VISION_CHECK_ENABLED") or "true").lower() == "true"
-                        and bool(GEMINI_API_KEY))
+                        and (bool(GEMINI_API_KEY) or bool(GROQ_API_KEY)))
+GROQ_VISION_MODEL = os.environ.get("GROQ_VISION_MODEL") or "meta-llama/llama-4-scout-17b-16e-instruct"
+VISION_PRIMARY = (os.environ.get("VISION_PRIMARY") or "gemini").lower()   # 'gemini' (akun Groq blm punya model vision) / 'groq'
 
 def _gemini_json(prompt):
     if not GEMINI_API_KEY:
@@ -1317,12 +1518,8 @@ def ai_image_keywords(slide_texts):
         pass
     return None
 
-def _extract_json(resp):
-    """Ambil JSON dari balasan Gemini walau dibungkus teks/markdown (```json ... ```)."""
-    try:
-        raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-    except Exception:
-        return None
+def _json_from_text(raw):
+    """Ambil objek JSON dari teks walau dibungkus markdown (```json ... ```) atau prosa."""
     raw = (raw or "").strip()
     if raw.startswith("```"):
         raw = raw.strip("`")
@@ -1340,6 +1537,61 @@ def _extract_json(resp):
             return json.loads(mobj.group(0))
         except Exception:
             return None
+    return None
+
+def _extract_json(resp):
+    """Ambil JSON dari balasan Gemini (response object)."""
+    try:
+        raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+    except Exception:
+        return None
+    return _json_from_text(raw)
+
+def _groq_vision_json(prompt, image_path):
+    """Kirim gambar + pertanyaan ke Groq (vision)."""
+    if not GROQ_API_KEY:
+        return None
+    try:
+        im = Image.open(image_path).convert("RGB")
+        im.thumbnail((768, 768))
+        buf = io.BytesIO(); im.save(buf, "JPEG", quality=82)
+        b64 = base64.b64encode(buf.getvalue()).decode()
+    except Exception as e:
+        print("    ! Groq vision siapin gambar gagal:", e); return None
+    data_uri = "data:image/jpeg;base64," + b64
+    body = {"model": GROQ_VISION_MODEL, "temperature": 0.2,
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": data_uri}}]}]}
+    for attempt in range(3):
+        try:
+            r = requests.post("https://api.groq.com/openai/v1/chat/completions",
+                              headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+                              json=body, timeout=60)
+        except Exception as e:
+            print("    ! Groq vision error:", e); return None
+        if r.status_code == 200:
+            try:
+                raw = r.json()["choices"][0]["message"]["content"]
+            except Exception:
+                return None
+            return _json_from_text(raw)
+        if r.status_code in (429, 500, 502, 503):
+            print(f"    ! Groq vision {r.status_code} (coba lagi {attempt+1}/3)")
+            time.sleep(1.2 * (attempt + 1)); continue
+        print(f"    ! Groq vision {r.status_code}: {r.text[:120]}")
+        return None
+    return None
+
+def vision_json(prompt, image_path):
+    """MATA AI terpadu: coba provider utama lalu cadangan (otomatis pindah kalau satu error)."""
+    order = ([("Gemini", _gemini_vision_json), ("Groq", _groq_vision_json)]
+             if VISION_PRIMARY == "gemini"
+             else [("Groq", _groq_vision_json), ("Gemini", _gemini_vision_json)])
+    for name, fn in order:
+        res = fn(prompt, image_path)
+        if isinstance(res, dict):
+            return res
     return None
 
 def _gemini_vision_json(prompt, image_path):
@@ -1395,7 +1647,7 @@ def ai_vision_check(image_path, zone, theme):
         'Balas HANYA JSON: {"ok": true atau false, "issue": "<masalah singkat bahasa Indonesia maks 12 kata; '
         'kosongkan kalau sudah ok>"}'
     )
-    data = _gemini_vision_json(prompt, image_path)   # 1x aja (retry malah boros kuota)
+    data = vision_json(prompt, image_path)   # Groq/Gemini (otomatis pindah kalau satu error)
     if not isinstance(data, dict):
         return None
     return {"ok": bool(data.get("ok", True)), "issue": str(data.get("issue") or "").strip()}
@@ -1403,7 +1655,7 @@ def ai_vision_check(image_path, zone, theme):
 def ai_learn_from_example(image_path):
     """Baca FOTO CONTOH yg dikirim user -> tangkap 'vibe'-nya jadi setelan (knob).
     Kembalikan {head_scale, body_scale, scrim, soft, note} atau None kalau gagal."""
-    if not GEMINI_API_KEY:
+    if not (GROQ_API_KEY or GEMINI_API_KEY):
         return None
     prompt = (
         "Kamu art director. Ini FOTO CONTOH desain konten Instagram yang DISUKAI user; "
@@ -1417,7 +1669,7 @@ def ai_learn_from_example(image_path):
         'Balas HANYA JSON: {"head_scale": <angka>, "body_scale": <angka>, "scrim": <angka>, '
         '"soft": <angka>, "note": "<ciri gaya foto ini, bahasa Indonesia, maks 15 kata>"}'
     )
-    data = _gemini_vision_json(prompt, image_path)
+    data = vision_json(prompt, image_path)
     return data if isinstance(data, dict) else None
 
 def _queue_revision(mem, rec, reason_label, new_photo=False, slides=None):
@@ -1699,6 +1951,7 @@ def process_page(page, workdir, mem=None, revision=None):
 
     slides_data, preview_paths, credits = [], [], []
     vision_notes = []           # catatan cek mandiri (AI vision) — cuma cover
+    smart_crop_slides = []      # slide mana yg berhasil auto-crop (buat lapor ke Telegram)
     used_ids = set()
     total = len(slide_blocks)
 
@@ -1757,7 +2010,8 @@ def process_page(page, workdir, mem=None, revision=None):
                                 credits.append(f"Slide {i}: {credit}")
                         else:
                             pim = make_placeholder()
-                    base = crop_to(pim, CANVAS_W, int(0.5 * CANVAS_H))
+                    base, _sc = smart_crop_to(pim, CANVAS_W, int(0.5 * CANVAS_H), cap)
+                    if _sc: smart_crop_slides.append(i)
                     base.save(ppath_clean, "PNG")            # bersih (buat html + overlay terpisah)
                     darken(base, 0.42).save(ppath, "PNG")    # versi gelap (buat svg/pptx/preview)
                 if cdir:
@@ -1807,9 +2061,10 @@ def process_page(page, workdir, mem=None, revision=None):
                         im = make_placeholder()
                         credits.append(f"Slide {i}: (background netral — gambar '{q}' tak ditemukan)")
                 if st["photo"] == "frame":
-                    im = crop_to(im, int(0.86 * CANVAS_W), int(0.34 * CANVAS_H))
+                    im, _sc = smart_crop_to(im, int(0.86 * CANVAS_W), int(0.34 * CANVAS_H), (headline + " " + body))
                 else:
-                    im = crop_to(im, CANVAS_W, CANVAS_H)
+                    im, _sc = smart_crop_to(im, CANVAS_W, CANVAS_H, (headline + " " + body))
+                if _sc: smart_crop_slides.append(i)
                 if is_single:
                     im = pencil_sketch(im)
                 im.save(img_path, "PNG")
@@ -1865,6 +2120,10 @@ def process_page(page, workdir, mem=None, revision=None):
         if b:
             lines.append(f"  {b}")
     lines += ["", *credits]
+    if smart_crop_slides:
+        lines += ["", f"✂️ Auto-crop cerdas jalan di slide: {', '.join(map(str, sorted(set(smart_crop_slides))))}"]
+    else:
+        lines += ["", "✂️ Auto-crop cerdas: nggak jalan (AI gagal/kuota) — foto pakai crop tengah"]
     if VISION_CHECK_ENABLED:
         warn = [n for n in vision_notes if "⚠️" in n]
         if warn:
