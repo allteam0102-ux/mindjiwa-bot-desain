@@ -606,9 +606,8 @@ def ai_focus_box(image_path, context):
     if y + h > 1: h = 1 - y
     return (x, y, w, h)
 
-def local_focus_box(im):
-    """Deteksi WAJAH pakai OpenCV (lokal, gratis, NGGAK makan kuota AI).
-    Balikin (x,y,w,h) fraksi union semua wajah, atau None kalau nggak ada wajah / cv2 belum keinstall."""
+def _face_box(im):
+    """Deteksi wajah (depan + samping) pakai OpenCV. None kalau nggak ada / cv2 belum keinstall."""
     try:
         import cv2, numpy as np
     except Exception:
@@ -616,17 +615,54 @@ def local_focus_box(im):
     try:
         arr = np.array(im.convert("RGB"))[:, :, ::-1]
         gray = cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY)
-        cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-        faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(40, 40))
-        if len(faces) == 0:
+        boxes = []
+        for xml in ("haarcascade_frontalface_default.xml", "haarcascade_profileface.xml"):
+            c = cv2.CascadeClassifier(cv2.data.haarcascades + xml)
+            if c.empty():
+                continue
+            for (x, y, w, h) in c.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(40, 40)):
+                boxes.append((int(x), int(y), int(w), int(h)))
+        if not boxes:
             return None
         H, W = gray.shape[:2]
-        x0 = min(int(f[0]) for f in faces); y0 = min(int(f[1]) for f in faces)
-        x1 = max(int(f[0]) + int(f[2]) for f in faces); y1 = max(int(f[1]) + int(f[3]) for f in faces)
+        x0 = min(b[0] for b in boxes); y0 = min(b[1] for b in boxes)
+        x1 = max(b[0] + b[2] for b in boxes); y1 = max(b[1] + b[3] for b in boxes)
         return (x0 / W, y0 / H, (x1 - x0) / W, (y1 - y0) / H)
     except Exception as e:
         print("    ! deteksi wajah gagal:", e)
         return None
+
+def _saliency_box(im):
+    """Fokus berbasis 'keramaian detail' (edge energy) pakai numpy saja — jalan walau opencv nggak ada."""
+    try:
+        import numpy as np
+        ww = 200; hh = max(1, int(ww * im.size[1] / max(1, im.size[0])))
+        g = np.asarray(im.convert("L").resize((ww, hh)), dtype=np.float32)
+        gx = np.pad(np.abs(np.diff(g, axis=1)), ((0, 0), (0, 1)))
+        gy = np.pad(np.abs(np.diff(g, axis=0)), ((0, 1), (0, 0)))
+        energy = gx + gy
+        total = float(energy.sum())
+        if total < 1.0:
+            return None   # foto nyaris polos -> biar crop tengah
+        H, W = energy.shape
+        yy, xx = np.indices((H, W))
+        cx = float((xx * energy).sum() / total) / W
+        cy = float((yy * energy).sum() / total) / H
+        sx = (float(((xx / W - cx) ** 2 * energy).sum() / total)) ** 0.5
+        sy = (float(((yy / H - cy) ** 2 * energy).sum() / total)) ** 0.5
+        hw = min(0.5, max(0.18, 2.0 * sx)); hh2 = min(0.5, max(0.18, 2.0 * sy))
+        x0 = max(0.0, cx - hw); y0 = max(0.0, cy - hh2)
+        x1 = min(1.0, cx + hw); y1 = min(1.0, cy + hh2)
+        if (x1 - x0) >= 0.96 and (y1 - y0) >= 0.96:
+            return None
+        return (x0, y0, x1 - x0, y1 - y0)
+    except Exception as e:
+        print("    ! saliency gagal:", e)
+        return None
+
+def local_focus_box(im):
+    """Fokus LOKAL (gratis): utamakan WAJAH; kalau nggak ada, pakai area paling ramai detail."""
+    return _face_box(im) or _saliency_box(im)
 
 def smart_crop_to(im, w, h, context=""):
     """Crop ke (w,h), 3 lapis: 1) AI (konteks) kalau nyala & kuota; 2) deteksi WAJAH lokal (gratis);
@@ -661,8 +697,8 @@ def smart_crop_to(im, w, h, context=""):
                 bx0 = max(0, (x - pad) * W); by0 = max(0, (y - pad) * H)
                 bx1 = min(W, (x + bw + pad) * W); by1 = min(H, (y + bh + pad) * H)
                 if bx1 - bx0 >= 8 and by1 - by0 >= 8:
-                    print("    [smart-crop] pakai deteksi WAJAH (lokal)")
-                    return _box_crop_wh(im, (bx0, by0, bx1, by1), w, h), "wajah"
+                    print("    [smart-crop] pakai fokus LOKAL (wajah/saliency)")
+                    return _box_crop_wh(im, (bx0, by0, bx1, by1), w, h), "lokal"
         except Exception as e:
             print("    ! crop lokal gagal:", e)
     # --- 3) crop tengah ---
