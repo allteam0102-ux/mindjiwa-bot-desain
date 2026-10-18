@@ -606,9 +606,32 @@ def ai_focus_box(image_path, context):
     if y + h > 1: h = 1 - y
     return (x, y, w, h)
 
+def local_focus_box(im):
+    """Deteksi WAJAH pakai OpenCV (lokal, gratis, NGGAK makan kuota AI).
+    Balikin (x,y,w,h) fraksi union semua wajah, atau None kalau nggak ada wajah / cv2 belum keinstall."""
+    try:
+        import cv2, numpy as np
+    except Exception:
+        return None
+    try:
+        arr = np.array(im.convert("RGB"))[:, :, ::-1]
+        gray = cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY)
+        cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+        faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(40, 40))
+        if len(faces) == 0:
+            return None
+        H, W = gray.shape[:2]
+        x0 = min(int(f[0]) for f in faces); y0 = min(int(f[1]) for f in faces)
+        x1 = max(int(f[0]) + int(f[2]) for f in faces); y1 = max(int(f[1]) + int(f[3]) for f in faces)
+        return (x0 / W, y0 / H, (x1 - x0) / W, (y1 - y0) / H)
+    except Exception as e:
+        print("    ! deteksi wajah gagal:", e)
+        return None
+
 def smart_crop_to(im, w, h, context=""):
-    """Crop ke (w,h). SMART_CROP aktif + ada konteks -> crop sesuai AI; gagal/mati -> crop tengah biasa.
-    Balikin (image, berhasil_smartcrop_bool)."""
+    """Crop ke (w,h), 3 lapis: 1) AI (konteks) kalau nyala & kuota; 2) deteksi WAJAH lokal (gratis);
+    3) crop tengah. Balikin (image, metode: 'ai'/'wajah'/None)."""
+    # --- 1) AI context crop ---
     if SMART_CROP_ENABLED and context and (GROQ_API_KEY or GEMINI_API_KEY):
         tmp = None
         try:
@@ -616,22 +639,34 @@ def smart_crop_to(im, w, h, context=""):
             im.convert("RGB").save(tmp, "JPEG", quality=88)
             box = ai_focus_box(tmp, context)
             if box:
-                W, H = im.size
-                x, y, bw, bh = box
-                pad = 0.10
+                W, H = im.size; x, y, bw, bh = box; pad = 0.10
                 bx0 = max(0, (x - pad) * W); by0 = max(0, (y - pad) * H)
                 bx1 = min(W, (x + bw + pad) * W); by1 = min(H, (y + bh + pad) * H)
                 if bx1 - bx0 >= 8 and by1 - by0 >= 8:
-                    print(f"    [smart-crop] fokus box={tuple(round(v, 2) for v in box)}")
-                    return _box_crop_wh(im, (bx0, by0, bx1, by1), w, h), True
+                    print(f"    [smart-crop] AI fokus box={tuple(round(v, 2) for v in box)}")
+                    return _box_crop_wh(im, (bx0, by0, bx1, by1), w, h), "ai"
         except Exception as e:
-            print("    ! smart-crop gagal, pakai crop tengah:", e)
+            print("    ! smart-crop AI gagal:", e)
         finally:
             try:
                 if tmp and os.path.exists(tmp): os.remove(tmp)
             except Exception:
                 pass
-    return crop_to(im, w, h), False
+    # --- 2) CADANGAN LOKAL: deteksi wajah (nggak makan kuota) ---
+    if SMART_CROP_ENABLED:
+        try:
+            fb = local_focus_box(im)
+            if fb:
+                W, H = im.size; x, y, bw, bh = fb; pad = 0.18
+                bx0 = max(0, (x - pad) * W); by0 = max(0, (y - pad) * H)
+                bx1 = min(W, (x + bw + pad) * W); by1 = min(H, (y + bh + pad) * H)
+                if bx1 - bx0 >= 8 and by1 - by0 >= 8:
+                    print("    [smart-crop] pakai deteksi WAJAH (lokal)")
+                    return _box_crop_wh(im, (bx0, by0, bx1, by1), w, h), "wajah"
+        except Exception as e:
+            print("    ! crop lokal gagal:", e)
+    # --- 3) crop tengah ---
+    return crop_to(im, w, h), None
 
 def pencil_sketch(im):
     import numpy as np
@@ -2123,7 +2158,7 @@ def process_page(page, workdir, mem=None, revision=None):
     if smart_crop_slides:
         lines += ["", f"✂️ Auto-crop cerdas jalan di slide: {', '.join(map(str, sorted(set(smart_crop_slides))))}"]
     else:
-        lines += ["", "✂️ Auto-crop cerdas: nggak jalan (AI gagal/kuota) — foto pakai crop tengah"]
+        lines += ["", "✂️ Auto-crop: foto pakai crop tengah (AI nggak tersedia & nggak ada wajah kedeteksi)"]
     if VISION_CHECK_ENABLED:
         warn = [n for n in vision_notes if "⚠️" in n]
         if warn:
