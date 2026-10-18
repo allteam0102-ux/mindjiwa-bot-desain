@@ -202,16 +202,21 @@ def notion_set_status(page_id, status_value, note=None, icon_emoji=None):
     props_with_note = dict(props)
     if note:
         props_with_note["Catatan"] = {"rich_text": [{"text": {"content": note[:1900]}}]}
-    body = {"properties": props_with_note}
-    if icon_emoji:
-        body["icon"] = {"type": "emoji", "emoji": icon_emoji}   # ubah ikon halaman (penanda selesai)
-    r = requests.patch(url, headers=NOTION_HEADERS, json=body, timeout=60)
+    r = requests.patch(url, headers=NOTION_HEADERS, json={"properties": props_with_note}, timeout=60)
     if r.status_code != 200:
-        # ulangi tanpa catatan (kalau kolom Catatan tak ada), ikon tetap diubah
-        body2 = {"properties": props}
-        if icon_emoji:
-            body2["icon"] = {"type": "emoji", "emoji": icon_emoji}
-        requests.patch(url, headers=NOTION_HEADERS, json=body2, timeout=60)
+        # ulangi tanpa catatan (kalau kolom Catatan tak ada)
+        requests.patch(url, headers=NOTION_HEADERS, json={"properties": props}, timeout=60)
+    # --- IKON halaman di-patch TERPISAH + di-log (biar nggak kebawa gagal sama kolom lain) ---
+    if icon_emoji:
+        try:
+            ri = requests.patch(url, headers=NOTION_HEADERS,
+                                json={"icon": {"type": "emoji", "emoji": icon_emoji}}, timeout=60)
+            if ri.status_code == 200:
+                print(f"    ikon halaman -> {icon_emoji}")
+            else:
+                print(f"    ! set ikon gagal {ri.status_code}: {ri.text[:200]}")
+        except Exception as e:
+            print("    ! set ikon error:", e)
 
 def notion_get_page(page_id):
     """Ambil ulang 1 halaman Notion by ID (buat auto-revisi)."""
