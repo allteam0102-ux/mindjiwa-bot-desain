@@ -84,8 +84,14 @@ LEARN_ENABLED = (os.environ.get("LEARN_ENABLED") or "true").lower() == "true"
 # "knob" yang bisa digeser oleh feedback (nilai awal = netral)
 G_HEAD_SCALE = 1.0   # pengali ukuran judul
 G_BODY_SCALE = 1.0   # pengali ukuran body
-G_SCRIM      = 1.0   # pengali kegelapan overlay (inert di Mindjiwa — overlay fix per-style)
-G_SOFT       = 0.0   # tambahan "film/soft" (inert di Mindjiwa)
+G_SCRIM      = 1.0   # pengali kegelapan overlay (sekarang AKTIF: 'overlay lebih gelap/tipis')
+G_SOFT       = 0.0   # tambahan "film/soft"
+G_HEAD_BOLD  = True  # judul tebal (True) / tipis (False) -> digeser lewat revisi "jangan bold"
+
+# Foto yg udah kepakai nggak boleh dipakai lagi sampai lewat sekian hari (default 6 bulan).
+PHOTO_COOLDOWN_DAYS = int(os.environ.get("PHOTO_COOLDOWN_DAYS") or 180)
+# Ketebalan overlay gelap di belakang teks (foto full/kutipan). <1.0 = lebih tipis.
+SCRIM_STRENGTH = float(os.environ.get("SCRIM_STRENGTH") or 1.0)
 
 def _clamp(v, lo, hi):
     return max(lo, min(hi, v))
@@ -383,11 +389,11 @@ def pexels_pick(query, used_ids):
     photos = _search(_short_q(query)) or _search(_short_q(query, add_hint=False)) or _search("aesthetic minimal calm")
     if not photos:
         return None, None
-    fresh = [p for p in photos if p.get("id") not in used_ids]
+    fresh = [p for p in photos if str(p.get("id")) not in used_ids]
     pool = fresh if fresh else photos
     photo = random.choice(pool[:8])
     if photo.get("id"):
-        used_ids.add(photo["id"])
+        used_ids.add(str(photo["id"]))
     img_url = photo["src"].get("large2x") or photo["src"].get("large") or photo["src"]["original"]
     return requests.get(img_url, timeout=60).content, f'Foto: {photo.get("photographer","-")} (Pexels)'
 
@@ -399,11 +405,11 @@ def unsplash_pick(query, used_ids):
     results = r.json().get("results", [])
     if not results:
         return None, None
-    fresh = [p for p in results if p.get("id") not in used_ids]
+    fresh = [p for p in results if str(p.get("id")) not in used_ids]
     pool = fresh if fresh else results
     photo = random.choice(pool[:8])
     if photo.get("id"):
-        used_ids.add(photo["id"])
+        used_ids.add(str(photo["id"]))
     urls = photo.get("urls", {})
     img_url = urls.get("regular") or urls.get("full") or urls.get("raw")
     name = (photo.get("user") or {}).get("name", "-")
@@ -423,9 +429,9 @@ def _unsplash_collection_random(used_ids):
             results = r.json()
             if not isinstance(results, list) or not results:
                 continue
-            fresh = [p for p in results if p.get("id") not in used_ids] or results
+            fresh = [p for p in results if str(p.get("id")) not in used_ids] or results
             photo = random.choice(fresh)
-            if photo.get("id"): used_ids.add(photo["id"])
+            if photo.get("id"): used_ids.add(str(photo["id"]))
             urls = photo.get("urls", {})
             img_url = urls.get("regular") or urls.get("full") or urls.get("raw")
             name = (photo.get("user") or {}).get("name", "-")
@@ -444,10 +450,10 @@ def unsplash_pick_collection(query, used_ids):
                                  "collections": UNSPLASH_COLLECTIONS}, timeout=60)
         if r.status_code == 200:
             results = r.json().get("results", [])
-            fresh = [p for p in results if p.get("id") not in used_ids] or results
+            fresh = [p for p in results if str(p.get("id")) not in used_ids] or results
             if fresh:
                 photo = random.choice(fresh[:8])
-                if photo.get("id"): used_ids.add(photo["id"])
+                if photo.get("id"): used_ids.add(str(photo["id"]))
                 urls = photo.get("urls", {})
                 img_url = urls.get("regular") or urls.get("full") or urls.get("raw")
                 name = (photo.get("user") or {}).get("name", "-")
@@ -472,9 +478,9 @@ def unsplash_pick_likes(used_ids):
             results = r.json()
             if not isinstance(results, list) or not results:
                 continue
-            fresh = [p for p in results if p.get("id") not in used_ids] or results
+            fresh = [p for p in results if str(p.get("id")) not in used_ids] or results
             photo = random.choice(fresh)
-            if photo.get("id"): used_ids.add(photo["id"])
+            if photo.get("id"): used_ids.add(str(photo["id"]))
             urls = photo.get("urls", {})
             img_url = urls.get("regular") or urls.get("full") or urls.get("raw")
             name = (photo.get("user") or {}).get("name", "-")
@@ -497,9 +503,9 @@ def pexels_pick_collection(query, used_ids):
             media = [m for m in r.json().get("media", []) if (m.get("type") or "").lower() == "photo"]
             if not media:
                 continue
-            fresh = [m for m in media if m.get("id") not in used_ids] or media
+            fresh = [m for m in media if str(m.get("id")) not in used_ids] or media
             photo = random.choice(fresh)
-            if photo.get("id"): used_ids.add(photo["id"])
+            if photo.get("id"): used_ids.add(str(photo["id"]))
             src = photo.get("src", {})
             img_url = src.get("large2x") or src.get("large") or src.get("original")
             if not img_url:
@@ -508,6 +514,32 @@ def pexels_pick_collection(query, used_ids):
         except Exception as e:
             print(f"    ! Pexels collection {cid} gagal:", e)
     return None, None
+
+# ---------- RIWAYAT FOTO: biar foto yg udah kepakai nggak muncul lagi < 6 bulan ----------
+def photo_block_set(mem):
+    """Kumpulan id foto (str) yg masih 'cooldown' + prune yg udah lewat 6 bulan (boleh lagi)."""
+    hist = mem.get("photo_history") or {}
+    now = int(time.time()); cutoff = PHOTO_COOLDOWN_DAYS * 86400
+    block, keep = set(), {}
+    for pid, ts in hist.items():
+        try:
+            ts = int(ts)
+        except Exception:
+            continue
+        if now - ts < cutoff:
+            block.add(str(pid)); keep[str(pid)] = ts
+    mem["photo_history"] = keep
+    return block
+
+def record_photos_used(mem, ids):
+    """Catat id foto (str) yg baru kepakai + timestamp sekarang."""
+    if not ids:
+        return
+    hist = mem.setdefault("photo_history", {})
+    now = int(time.time())
+    for pid in ids:
+        if pid:
+            hist[str(pid)] = now
 
 def image_pick(query, used_ids):
     """Sumber PRIBADI (koleksi/like akun user) dulu, baru internet umum sebagai cadangan."""
@@ -585,7 +617,8 @@ def _box_crop_wh(im, box_px, w, h):
     x0 = cx - cw / 2.0; y0 = cy - ch / 2.0
     x0 = max(0, min(W - cw, x0)); y0 = max(0, min(H - ch, y0))
     im2 = im.crop((int(round(x0)), int(round(y0)), int(round(x0 + cw)), int(round(y0 + ch))))
-    return im2.resize((w, h), Image.LANCZOS)
+    rect = (x0 / W, y0 / H, (x0 + cw) / W, (y0 + ch) / H)   # posisi crop (fraksi) utk crop editable Figma
+    return im2.resize((w, h), Image.LANCZOS), rect
 
 def ai_focus_box(image_path, context):
     """Tanya MATA AI: bagian foto mana yg PALING nyambung sama konteks slide. (x,y,w,h) fraksi atau None."""
@@ -671,7 +704,7 @@ def local_focus_box(im):
 
 def smart_crop_to(im, w, h, context=""):
     """Crop ke (w,h), 3 lapis: 1) AI (konteks) kalau nyala & kuota; 2) deteksi WAJAH lokal (gratis);
-    3) crop tengah. Balikin (image, metode: 'ai'/'wajah'/None)."""
+    3) crop tengah. Balikin (image, metode: 'ai'/'lokal'/None, rect_crop_fraksi atau None)."""
     # --- 1) AI context crop ---
     if SMART_CROP_ENABLED and context and (GROQ_API_KEY or GEMINI_API_KEY):
         tmp = None
@@ -685,7 +718,8 @@ def smart_crop_to(im, w, h, context=""):
                 bx1 = min(W, (x + bw + pad) * W); by1 = min(H, (y + bh + pad) * H)
                 if bx1 - bx0 >= 8 and by1 - by0 >= 8:
                     print(f"    [smart-crop] AI fokus box={tuple(round(v, 2) for v in box)}")
-                    return _box_crop_wh(im, (bx0, by0, bx1, by1), w, h), "ai"
+                    cropped, rect = _box_crop_wh(im, (bx0, by0, bx1, by1), w, h)
+                    return cropped, "ai", rect
         except Exception as e:
             print("    ! smart-crop AI gagal:", e)
         finally:
@@ -703,11 +737,12 @@ def smart_crop_to(im, w, h, context=""):
                 bx1 = min(W, (x + bw + pad) * W); by1 = min(H, (y + bh + pad) * H)
                 if bx1 - bx0 >= 8 and by1 - by0 >= 8:
                     print("    [smart-crop] pakai fokus LOKAL (wajah/saliency)")
-                    return _box_crop_wh(im, (bx0, by0, bx1, by1), w, h), "lokal"
+                    cropped, rect = _box_crop_wh(im, (bx0, by0, bx1, by1), w, h)
+                    return cropped, "lokal", rect
         except Exception as e:
             print("    ! crop lokal gagal:", e)
-    # --- 3) crop tengah ---
-    return crop_to(im, w, h), None
+    # --- 3) crop tengah (rect=None -> HTML pakai cover tengah, tetap full & editable) ---
+    return crop_to(im, w, h), None, None
 
 def pencil_sketch(im):
     import numpy as np
@@ -752,6 +787,60 @@ def style_of(theme):
     return dict(kind="krem", bg=CREAM_COLOR, head=INK, body="555555", foot=INK,
                 photo="frame", align="left", serif=False, quote=False,
                 head_top=0.50, body_top=0.67, head_size=40, body_size=26)
+
+
+# ---------- AUTO-FIT: biar judul & body NGGAK ketimpa & nggak keluar kanvas ----------
+def _est_lines(text, width_px, font_px, bold):
+    """Perkiraan jumlah baris setelah turun-baris di lebar frame (samain sama _svg_rich)."""
+    if not text or not text.strip():
+        return 0
+    cf = 0.64 if bold else 0.58
+    space_w = font_px * 0.46
+    lines = 0
+    for line in (text or "").split("\n"):
+        words = rich_words(line)
+        if not words:
+            lines += 1; continue
+        cur_w = 0.0
+        for tup in words:
+            w = tup[0]; ww = len(w) * font_px * cf
+            add = ww + (space_w if cur_w > 0 else 0)
+            if cur_w > 0 and cur_w + add > width_px:
+                lines += 1; cur_w = ww
+            else:
+                cur_w += add
+        lines += 1
+    return lines
+
+def fit_text_layout(st, headline, body):
+    """Ukuran font & posisi (fraksi) judul+body yg DIJAMIN: body di BAWAH judul (nggak ketimpa)
+    + muat sebelum footer. Kalau kepanjangan, font otomatis diperkecil."""
+    W, H = CANVAS_W, CANVAS_H
+    tw = 0.86 * W
+    hpx = head_px(st["head_size"]); bpx = body_px(st["body_size"])
+    HEAD_LH, BODY_LH, GAP = 1.28, 1.38, 0.02
+    top0 = st["head_top"]; body_min = st["body_top"]
+    bottom = 0.88                      # batas bawah (di atas footer 0.905)
+    for _ in range(24):
+        hl = _est_lines(headline, tw, hpx, G_HEAD_BOLD)
+        bl = _est_lines(body, tw, bpx, False)
+        hh = hl * hpx * HEAD_LH / H
+        bh = bl * bpx * BODY_LH / H
+        btop = max(body_min, top0 + hh + (GAP if hl else 0.0))
+        if btop + bh <= bottom:
+            break
+        if hpx > 22 and hh >= bh:
+            hpx = max(22, int(hpx * 0.94))
+        elif bpx > 15:
+            bpx = max(15, int(bpx * 0.95))
+        elif hpx > 16:
+            hpx = max(16, int(hpx * 0.94))
+        else:
+            break
+    hl = _est_lines(headline, tw, hpx, G_HEAD_BOLD)
+    hh = hl * hpx * HEAD_LH / H
+    btop = max(body_min, top0 + hh + (GAP if hl else 0.0))
+    return {"head_px": hpx, "body_px": bpx, "head_top": top0, "body_top": btop}
 
 
 def download_logo_path():
@@ -813,13 +902,24 @@ def _add_rich(slide, left, top, width, height, text, size_pt, bold, font, color_
                 f.color.rgb = hex_rgb(color_hex)
     return box
 
+# Titik gradasi overlay foto full/kutipan (dipakai bareng PNG/SVG/HTML).
+OV_FULL_STOPS = [(0.0, 0.15), (0.35, 0.25), (0.65, 0.6), (1.0, 0.9)]
+def _ov_factor():
+    """Pengali kegelapan overlay: ketebalan default x knob 'overlay lebih gelap/tipis'."""
+    return SCRIM_STRENGTH * G_SCRIM
+def _ov_scaled(stops):
+    k = _ov_factor()
+    return [(o, _clamp(op * k, 0.0, 1.0)) for o, op in stops]
+def _ov_css(stops):
+    return ", ".join(f"rgba(0,0,0,{op:.3f}) {o*100:.0f}%" for o, op in _ov_scaled(stops))
+
 _SCRIM_CACHE = {}
 def _scrim_png():
     """Bikin (sekali) PNG gradasi hitam transparan->gelap buat masking halus di PPTX."""
-    key = (CANVAS_W, CANVAS_H)
+    key = (CANVAS_W, CANVAS_H, round(_ov_factor(), 3))
     if key in _SCRIM_CACHE and os.path.exists(_SCRIM_CACHE[key]):
         return _SCRIM_CACHE[key]
-    stops = [(0.0, 0.15), (0.35, 0.25), (0.65, 0.6), (1.0, 0.9)]
+    stops = _ov_scaled(OV_FULL_STOPS)
     def op_at(t):
         for i in range(len(stops) - 1):
             t0, a0 = stops[i]; t1, a1 = stops[i + 1]
@@ -831,7 +931,7 @@ def _scrim_png():
     d = ImageDraw.Draw(ov)
     for y in range(CANVAS_H):
         d.line([(0, y), (CANVAS_W, y)], fill=(0, 0, 0, op_at(y / CANVAS_H)))
-    path = os.path.join(tempfile.gettempdir(), f"scrim_{CANVAS_W}x{CANVAS_H}.png")
+    path = os.path.join(tempfile.gettempdir(), f"scrim_{CANVAS_W}x{CANVAS_H}_{round(_ov_factor(),3)}.png")
     ov.save(path, "PNG")
     _SCRIM_CACHE[key] = path
     return path
@@ -899,12 +999,15 @@ def build_pptx(slides_data, out_path, logo_path):
         align = PP_ALIGN.CENTER if st["align"] == "center" else PP_ALIGN.LEFT
         head_font = SERIF_FONT if st["serif"] else HEADLINE_FONT
         left = 0.07; width = 0.86
+        fit = fit_text_layout(st, s.get("headline", ""), s.get("body", ""))
+        hr = fit["head_px"] / max(1, head_px(st["head_size"]))
+        br = fit["body_px"] / max(1, body_px(st["body_size"]))
         if s["headline"]:
-            _add_rich(slide, left, st["head_top"], width, 0.20, s["headline"],
-                      head_pt(st["head_size"] * 0.66), True, head_font, st["head"], align=align)
+            _add_rich(slide, left, fit["head_top"], width, 0.22, s["headline"],
+                      head_pt(st["head_size"] * 0.66 * hr), G_HEAD_BOLD, head_font, st["head"], align=align)
         if s["body"]:
-            _add_rich(slide, left, st["body_top"], width, 0.24, s["body"],
-                      body_pt(st["body_size"] * 0.62), False, BODY_FONT, st["body"], align=align)
+            _add_rich(slide, left, fit["body_top"], width, 0.26, s["body"],
+                      body_pt(st["body_size"] * 0.62 * br), False, BODY_FONT, st["body"], align=align)
 
         _add_rich(slide, 0.08, 0.90, 0.55, 0.08, FOOTER_TEXT, 13, True, BODY_FONT, st["foot"], highlight=False)
         if s["total"] > 1:
@@ -1056,13 +1159,9 @@ def build_svg_single(slides_data, out_path, logo_path):
                          f'preserveAspectRatio="xMidYMid slice" href="{_img_data_uri(s["image_path"])}"/>')
             # masking GRADASI HALUS (terang di atas -> gelap di bawah tempat teks)
             gid = f"ovg{idx}"
-            parts.append(
-                f'<defs><linearGradient id="{gid}" x1="0" y1="0" x2="0" y2="1">'
-                f'<stop offset="0%" stop-color="#000000" stop-opacity="0.15"/>'
-                f'<stop offset="35%" stop-color="#000000" stop-opacity="0.25"/>'
-                f'<stop offset="65%" stop-color="#000000" stop-opacity="0.6"/>'
-                f'<stop offset="100%" stop-color="#000000" stop-opacity="0.9"/>'
-                f'</linearGradient></defs>')
+            _ovstops = "".join(f'<stop offset="{o*100:.0f}%" stop-color="#000000" stop-opacity="{op:.3f}"/>'
+                               for o, op in _ov_scaled(OV_FULL_STOPS))
+            parts.append(f'<defs><linearGradient id="{gid}" x1="0" y1="0" x2="0" y2="1">{_ovstops}</linearGradient></defs>')
             parts.append(f'<rect x="{xo}" y="0" width="{CANVAS_W}" height="{H}" fill="url(#{gid})"/>')
         elif st["photo"] == "frame" and s.get("image_path"):
             fx0 = xo + int(0.07*CANVAS_W); fy0 = int(0.11*H)
@@ -1085,12 +1184,13 @@ def build_svg_single(slides_data, out_path, logo_path):
                          f'font-weight="700" fill="#{ACCENT_COLOR}">“</text>')
 
         hx = xo + int(0.07*CANVAS_W); hw = int(0.86*CANVAS_W)
+        fit = fit_text_layout(st, s.get("headline", ""), s.get("body", ""))
         if s["headline"]:
-            svg, _ = _svg_rich(s["headline"], hx, int(st["head_top"]*H), hw, head_px(st["head_size"]), True,
+            svg, _ = _svg_rich(s["headline"], hx, int(fit["head_top"]*H), hw, fit["head_px"], G_HEAD_BOLD,
                                SERIF_FONT if st["serif"] else HEADLINE_FONT, st["head"], align=st["align"])
             parts.append(svg)
         if s["body"]:
-            svg, _ = _svg_rich(s["body"], hx, int(st["body_top"]*H), hw, body_px(st["body_size"]), False,
+            svg, _ = _svg_rich(s["body"], hx, int(fit["body_top"]*H), hw, fit["body_px"], False,
                                BODY_FONT, st["body"], align=st["align"])
             parts.append(svg)
 
@@ -1164,13 +1264,12 @@ def build_html(slides_data, out_path, logo_path):
     /* FOTO (bersih) & MASKING overlay dipisah jadi layer sendiri-sendiri */
     .photo-full {{ position:absolute; inset:0; }}
     .photo-full img {{ width:100%; height:100%; object-fit:cover; display:block; }}
-    .ov-full {{ position:absolute; inset:0; background:linear-gradient(to bottom,
-                 rgba(0,0,0,.15) 0%, rgba(0,0,0,.25) 35%, rgba(0,0,0,.6) 65%, rgba(0,0,0,.9) 100%); }}
+    .ov-full {{ position:absolute; inset:0; background:linear-gradient(to bottom, {_ov_css(OV_FULL_STOPS)}); }}
     .photo-frame {{ position:absolute; left:7%; top:11%; width:86%; height:34%;
                     object-fit:cover; border-radius:28px; display:block; }}
     .duo-cell {{ position:absolute; left:0; width:100%; height:50%; overflow:hidden; }}
     .duo-cell img {{ width:100%; height:100%; object-fit:cover; display:block; }}
-    .duo-cell .ov {{ position:absolute; inset:0; background:rgba(0,0,0,.42); }}
+    .duo-cell .ov {{ position:absolute; inset:0; background:rgba(0,0,0,{_clamp(0.42*_ov_factor(),0,1):.3f}); }}
     .logo {{ position:absolute; left:6%; top:5%; height:5%; }}
     .hashtag {{ position:absolute; right:6%; top:5.2%; color:#{ACCENT_COLOR};
                 font-weight:700; font-size:22px; }}
@@ -1226,7 +1325,19 @@ def build_html(slides_data, out_path, logo_path):
         # foto + masking (overlay) terpisah
         if st["photo"] == "full" and s.get("image_path"):
             bp.append('<div class="photo-full">')
-            bp.append(f'<img src="{_img_data_uri(s["image_path"])}" alt="">')
+            full_p = s.get("full_path"); rect = s.get("crop_rect")
+            if full_p:
+                # FOTO UTUH + crop sbg frame -> di Figma bisa di-recrop (nggak kepotong permanen)
+                if rect:
+                    x0, y0, x1, y1 = rect
+                    cw = max(1e-3, x1 - x0); ch = max(1e-3, y1 - y0)
+                    stimg = (f"position:absolute;left:{-x0/cw*100:.3f}%;top:{-y0/ch*100:.3f}%;"
+                             f"width:{100/cw:.3f}%;height:{100/ch:.3f}%;max-width:none;object-fit:fill;")
+                else:
+                    stimg = "position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:50% 50%;"
+                bp.append(f'<img src="{_img_data_uri(full_p)}" alt="" style="{stimg}">')
+            else:
+                bp.append(f'<img src="{_img_data_uri(s["image_path"])}" alt="">')
             bp.append('<div class="ov-full"></div>')   # masking terpisah dari foto
             bp.append('</div>')
         elif st["photo"] == "frame" and s.get("image_path"):
@@ -1240,13 +1351,15 @@ def build_html(slides_data, out_path, logo_path):
 
         hfont = SERIF_FONT if st["serif"] else HEADLINE_FONT
         talign = "center" if st["align"] == "center" else "left"
+        fit = fit_text_layout(st, s.get("headline", ""), s.get("body", ""))
+        hweight = 700 if G_HEAD_BOLD else 400
         if s["headline"]:
-            bp.append(f'<div class="tx headline" style="top:{st["head_top"]*100:.1f}%;'
-                      f'font-family:\'{hfont}\',Georgia,serif;font-size:{head_px(st["head_size"])}px;'
+            bp.append(f'<div class="tx headline" style="top:{fit["head_top"]*100:.1f}%;'
+                      f'font-family:\'{hfont}\',Georgia,serif;font-size:{fit["head_px"]}px;font-weight:{hweight};'
                       f'color:#{st["head"]};text-align:{talign}">{_html_rich_mj(s["headline"])}</div>')
         if s["body"]:
-            bp.append(f'<div class="tx body" style="top:{st["body_top"]*100:.1f}%;'
-                      f'font-size:{body_px(st["body_size"])}px;color:#{st["body"]};'
+            bp.append(f'<div class="tx body" style="top:{fit["body_top"]*100:.1f}%;'
+                      f'font-size:{fit["body_px"]}px;color:#{st["body"]};'
                       f'text-align:{talign}">{_html_rich_mj(s["body"])}</div>')
 
         bp.append(footer_html(st["foot"]))
@@ -1369,7 +1482,8 @@ def tg_download_file(file_path, out_path):
 # 8b. SISTEM BELAJAR — memori + feedback (approve/reject + alasan)
 # ======================================================================
 DEFAULT_MEMORY = {
-    "preferences": {"head_scale": 1.0, "body_scale": 1.0, "scrim": 1.0, "soft": 0.0},
+    "preferences": {"head_scale": 1.0, "body_scale": 1.0, "scrim": 1.0, "soft": 0.0, "head_bold": True},
+    "photo_history": {},  # id_foto (str) -> unix_ts terakhir dipakai (anti pakai-ulang < 6 bulan)
     "pending": {},        # token -> {title, page_id, ts, revision}
     "resolved": [],       # token yang sudah dinilai (anti dobel)
     "awaiting_text": None,  # token yang menunggu alasan ketik
@@ -1436,7 +1550,7 @@ def apply_reason(prefs, code):
 def prefs_summary(prefs):
     return (f"Setelan belajar sekarang: judul {int(prefs['head_scale']*100)}%, "
             f"body {int(prefs['body_scale']*100)}%, overlay {int(prefs['scrim']*100)}%, "
-            f"soft +{int(prefs['soft']*100)}%.")
+            f"soft +{int(prefs['soft']*100)}%, judul {'tebal' if prefs.get('head_bold', True) else 'tipis'}.")
 
 
 # ---------- OTAK AI: Groq (utama) + Gemini (cadangan). Dua-duanya gratis ----------
@@ -1511,6 +1625,9 @@ Terjemahkan jadi penyesuaian angka. Setelan sekarang (1.0 = normal):
 - body_scale: ukuran teks BODY (batas 0.7-1.3)
 - scrim: kegelapan overlay di belakang teks (batas 0.6-1.6; naik = lebih gelap = teks lebih terbaca)
 - soft: kesan film/lembut pada gambar (batas 0.0-0.4; naik = lebih lembut/pudar; turun = lebih cerah/tajam)
+- head_bold: JUDUL tebal/bold (true) atau tipis/normal (false). Isi true/false HANYA kalau user
+  nyinggung ketebalan judul ("judul jangan bold", "tipisin tulisannya" -> false; "tebelin judulnya" -> true).
+  Kalau nggak nyinggung -> null.
 PENTING: hampir SEMUA masukan user = permintaan revisi -> set action "revise".
 Keluhan/komentar sekecil apapun soal desain (foto/teks/warna/overlay) = "revise".
 Contoh yang HARUS "revise": "gambar kurang bagus", "kurang aesthetic", "ganti foto",
@@ -1524,12 +1641,80 @@ Kalau user cuma soal TEKS/judul/overlay/warna (bukan foto), "new_photo": false (
 PENTING soal SLIDE: kalau user nyebut nomor slide (mis. "slide 2", "slide 1 dan 3"),
 isi "slides" dengan daftar nomor itu. Kalau nggak nyebut nomor, "slides": [] (artinya semua slide).
 Balas HANYA JSON valid, tanpa teks lain:
-{"head_scale_delta": <angka -0.12..0.12>, "body_scale_delta": <angka>, "scrim_delta": <angka>, "soft_delta": <angka>, "note": "<ringkasan singkat dalam bahasa Indonesia, maks 12 kata>", "action": "revise" atau "none", "new_photo": true/false, "slides": [<nomor slide>]}
+{"head_scale_delta": <angka -0.12..0.12>, "body_scale_delta": <angka>, "scrim_delta": <angka>, "soft_delta": <angka>, "head_bold": true/false/null, "note": "<ringkasan singkat dalam bahasa Indonesia, maks 12 kata>", "action": "revise" atau "none", "new_photo": true/false, "slides": [<nomor slide>]}
 Pesan user: "%s" """
 
 def ai_parse_command(text):
     """Ubah kalimat bebas jadi penyesuaian angka (Groq/Gemini). None kalau gagal/mati."""
     return ai_json(AI_PROMPT % text[:400])
+
+def local_parse_command(text):
+    """Penerjemah revisi LOKAL (tanpa AI) berbasis kata kunci -> ketikan SELALU ngefek walau AI mati."""
+    low = (text or "").lower()
+    def has(*kw): return any(k in low for k in kw)
+    d = {"head_scale_delta": 0.0, "body_scale_delta": 0.0, "scrim_delta": 0.0,
+         "soft_delta": 0.0, "head_bold": None, "new_photo": False,
+         "slides": _slide_nums_in(text), "note": "", "action": "none"}
+    notes = []
+    hit_judul = has("judul", "headline", "title", "tulisan besar")
+    hit_body  = has("body", "isi", "caption", "deskripsi", "paragraf", "teks kecil")
+    both = (not hit_judul and not hit_body)
+    if has("kegedean", "kegede", "kebesaran", "gede banget", "terlalu besar", "terlalu gede", "kecilin", "perkecil", "kecilkan"):
+        if hit_judul or both: d["head_scale_delta"] -= 0.12
+        if hit_body  or both: d["body_scale_delta"] -= 0.10
+        notes.append("teks dikecilin")
+    if has("kekecilan", "kecil banget", "terlalu kecil", "gedein", "perbesar", "besarin", "lebih besar", "lebih gede"):
+        if hit_judul or both: d["head_scale_delta"] += 0.12
+        if hit_body  or both: d["body_scale_delta"] += 0.10
+        notes.append("teks digedein")
+    if has("susah kebaca", "susah dibaca", "ga kebaca", "nggak kebaca", "gak kebaca", "kurang jelas",
+           "nggak jelas", "overlay kurang gelap", "kurang gelap", "lebih gelap", "pergelap"):
+        d["scrim_delta"] += 0.15; notes.append("overlay dipergelap")
+    if has("overlay kegelapan", "kegelapan", "terlalu gelap", "overlay tebal", "overlay tipisin",
+           "kurangi overlay", "overlay kurangin", "gelap banget"):
+        d["scrim_delta"] -= 0.15; notes.append("overlay dipertipis")
+    if has("lebih soft", "lebih lembut", "lebih film", "lebih pudar", "lembutin", "vintage"):
+        d["soft_delta"] += 0.10; notes.append("foto dibikin lembut")
+    if has("lebih cerah", "lebih terang", "lebih tajam", "cerahin", "terangin", "tajamin", "jangan pudar"):
+        d["soft_delta"] -= 0.10; notes.append("foto dibikin cerah")
+    if has("jangan bold", "ga bold", "gak bold", "nggak bold", "tanpa bold", "jangan tebal", "jangan tebel",
+           "nggak tebal", "tipisin", "tipis", "jangan ada yang bold", "nggak ada yang bold"):
+        d["head_bold"] = False; notes.append("judul dibikin tipis")
+    elif has("dibold", "di bold", "pakai bold", "tebelin", "tebalin", "dipertebal", "pertebal", "judul tebal", "bold lagi"):
+        d["head_bold"] = True; notes.append("judul dibikin tebal")
+    if has("ganti foto", "ganti gambar", "foto baru", "gambar baru", "foto jelek", "gambar jelek",
+           "foto kurang", "gambar kurang", "foto nggak", "gambar nggak", "aesthetic", "estetik",
+           "foto lain", "gambar lain", "fotonya jelek", "gambarnya jelek"):
+        d["new_photo"] = True; notes.append("foto diganti baru")
+    _rev_kata = ("ganti", "ubah", "revisi", "perbaiki", "kurang", "jelek", "buram", "norak",
+                 "kegedean", "kekecilan", "lebih ", "jangan", "terlalu", "bold", "tebal",
+                 "tipis", "tebel", "numpuk", "tumpang", "ketimpa", "nabrak")
+    any_change = (abs(d["head_scale_delta"]) + abs(d["body_scale_delta"]) + abs(d["scrim_delta"])
+                  + abs(d["soft_delta"]) >= 0.01) or (d["head_bold"] is not None) or d["new_photo"]
+    if any_change or has(*_rev_kata):
+        d["action"] = "revise"
+    d["note"] = (", ".join(notes) or (text or "")[:60])
+    return d
+
+def _merge_cmd(ai_data, local):
+    """Gabung AI + lokal. Lokal nambal yg AI lewatin -> ketikan selalu ngefek."""
+    if not ai_data:
+        return local
+    for k in ("head_scale_delta", "body_scale_delta", "scrim_delta", "soft_delta"):
+        try:
+            if abs(float(ai_data.get(k, 0) or 0)) < 0.01 and abs(float(local.get(k, 0) or 0)) >= 0.01:
+                ai_data[k] = local[k]
+        except Exception:
+            pass
+    if ai_data.get("head_bold", None) is None and local.get("head_bold", None) is not None:
+        ai_data["head_bold"] = local["head_bold"]
+    if not ai_data.get("new_photo") and local.get("new_photo"):
+        ai_data["new_photo"] = True
+    if not ai_data.get("slides") and local.get("slides"):
+        ai_data["slides"] = local["slides"]
+    if local.get("action") == "revise" and ai_data.get("action") != "revise":
+        ai_data["action"] = "revise"
+    return ai_data
 
 def apply_ai(prefs, data):
     """Terapkan delta dari AI (dibatasi aman). Kembalikan daftar yg berubah."""
@@ -1545,8 +1730,18 @@ def apply_ai(prefs, data):
             d = 0.0
         d = _clamp(d, -0.15, 0.15)   # batasi per-perintah biar nggak loncat jauh
         if abs(d) >= 0.01:
-            prefs[knob] = _clamp(prefs[knob] + d, lo, hi)
-            changed.append(knob)
+            new = _clamp(prefs[knob] + d, lo, hi)
+            if abs(new - float(prefs[knob])) >= 1e-6:   # cuma catat kalau beneran berubah
+                prefs[knob] = new
+                changed.append(knob)
+    # judul tebal/tipis (on/off)
+    hb = data.get("head_bold", None)
+    if isinstance(hb, str):
+        hb = {"true": True, "false": False, "ya": True, "iya": True, "tidak": False,
+              "no": False, "yes": True, "1": True, "0": False}.get(hb.strip().lower(), None)
+    if isinstance(hb, bool) and bool(prefs.get("head_bold", True)) != hb:
+        prefs["head_bold"] = hb
+        changed.append("head_bold")
     return changed
 
 def apply_example(prefs, data):
@@ -1866,10 +2061,14 @@ def process_feedback(mem):
                 continue
             # ---- CHAT AI: perintah revisi bebas (ketik kalimat biasa) ----
             if text:
-                data = ai_parse_command(text)
+                # Penerjemah LOKAL dulu (tanpa AI) -> ketikan SELALU ngefek walau AI mati.
+                local_cmd = local_parse_command(text)
+                data = ai_parse_command(text)        # AI (kalau nyala) biar lebih pinter
+                data = _merge_cmd(data, local_cmd)   # lokal nambal yg AI lewatin
                 # PENGAMAN: AI bilang "none" tapi teks jelas keluhan + ada desain nunggu -> tetap REVISI
                 _rev_kata = ("ganti", "ubah", "revisi", "perbaiki", "kurang", "jelek", "buram",
-                             "norak", "kegedean", "kekecilan", "lebih ", "jangan", "terlalu")
+                             "norak", "kegedean", "kekecilan", "lebih ", "jangan", "terlalu",
+                             "bold", "tebal", "tipis", "tebel", "numpuk", "tumpang", "ketimpa", "nabrak")
                 if (data and data.get("action") == "none"
                         and any(k in low for k in _rev_kata) and _latest_pending(mem)):
                     data["action"] = "revise"
@@ -1975,12 +2174,13 @@ def process_feedback(mem):
     return mem
 
 def apply_prefs_to_globals(mem):
-    global G_HEAD_SCALE, G_BODY_SCALE, G_SCRIM, G_SOFT
+    global G_HEAD_SCALE, G_BODY_SCALE, G_SCRIM, G_SOFT, G_HEAD_BOLD
     p = mem.get("preferences", {})
     G_HEAD_SCALE = float(p.get("head_scale", 1.0))
     G_BODY_SCALE = float(p.get("body_scale", 1.0))
     G_SCRIM      = float(p.get("scrim", 1.0))
     G_SOFT       = float(p.get("soft", 0.0))
+    G_HEAD_BOLD  = bool(p.get("head_bold", True))
 
 
 # ======================================================================
@@ -2028,7 +2228,8 @@ def process_page(page, workdir, mem=None, revision=None):
     slides_data, preview_paths, credits = [], [], []
     vision_notes = []           # catatan cek mandiri (AI vision) — cuma cover
     smart_crop_slides = []      # slide mana yg berhasil auto-crop (buat lapor ke Telegram)
-    used_ids = set()
+    # mulai dari daftar foto yg masih 'cooldown' (dipakai < 6 bln) -> otomatis dihindari
+    used_ids = set(photo_block_set(mem)) if mem is not None else set()
     total = len(slide_blocks)
 
     # --- REUSE CACHE: pas revisi, foto yg udah di-approve dipakai lagi (per slide) ---
@@ -2079,7 +2280,10 @@ def process_page(page, workdir, mem=None, revision=None):
                         pim = Image.open(io.BytesIO(fetch_image_bytes(purl))).convert("RGB")
                     else:
                         q = keyword_for(0, [], cap, "")
+                        _before = set(used_ids)
                         data, credit = image_pick(q, used_ids)
+                        if data and mem is not None:
+                            record_photos_used(mem, used_ids - _before)
                         if data:
                             pim = Image.open(io.BytesIO(data)).convert("RGB")
                             if credit:
@@ -2111,6 +2315,8 @@ def process_page(page, workdir, mem=None, revision=None):
         headline, body = headline_and_body(clean)
 
         img_path = None
+        full_path = None       # foto UTUH (buat crop editable di Figma lewat HTML)
+        crop_rect = None       # posisi crop (fraksi) di foto utuh
         if st["photo"] != "none":
             img_path = os.path.join(workdir, f"slide_{i}.png")
             cpath = os.path.join(rev_reuse["dir"], f"slide_{i}.png") if rev_reuse else None
@@ -2128,7 +2334,10 @@ def process_page(page, workdir, mem=None, revision=None):
                         q = ai_kws[i - 1].strip()          # kata kunci FOTO dari AI (Inggris)
                     else:
                         q = keyword_for(i - 1, keyword_blocks, headline, body)
+                    _before = set(used_ids)
                     data, credit = image_pick(q, used_ids)
+                    if data and mem is not None:
+                        record_photos_used(mem, used_ids - _before)
                     if data:
                         im = Image.open(io.BytesIO(data)).convert("RGB")
                         if credit:
@@ -2137,9 +2346,17 @@ def process_page(page, workdir, mem=None, revision=None):
                         im = make_placeholder()
                         credits.append(f"Slide {i}: (background netral — gambar '{q}' tak ditemukan)")
                 if st["photo"] == "frame":
-                    im, _sc = smart_crop_to(im, int(0.86 * CANVAS_W), int(0.34 * CANVAS_H), (headline + " " + body))
+                    im, _sc, _rect = smart_crop_to(im, int(0.86 * CANVAS_W), int(0.34 * CANVAS_H), (headline + " " + body))
                 else:
-                    im, _sc = smart_crop_to(im, CANVAS_W, CANVAS_H, (headline + " " + body))
+                    _full_src = im   # simpan foto utuh dulu
+                    im, _sc, crop_rect = smart_crop_to(im, CANVAS_W, CANVAS_H, (headline + " " + body))
+                    # foto UTUH buat crop editable di Figma (cuma foto full & bukan single/pensil)
+                    if OUTPUT_HTML and not is_single:
+                        try:
+                            full_path = os.path.join(workdir, f"full_{i}.png")
+                            _full_src.save(full_path, "PNG")
+                        except Exception as _fe:
+                            print("    ! gagal simpan foto utuh:", _fe); full_path = None
                 if _sc: smart_crop_slides.append(i)
                 if is_single:
                     im = pencil_sketch(im)
@@ -2155,6 +2372,7 @@ def process_page(page, workdir, mem=None, revision=None):
         if cdir is not None:
             slide_cache[str(i)] = {"kind": st["kind"], "theme": theme}
         slides_data.append({"headline": headline, "body": body, "image_path": img_path,
+                            "full_path": full_path, "crop_rect": crop_rect,
                             "index": i, "total": total, "theme": theme})
 
     # catat metadata cache (buat cek kecocokan di revisi berikutnya)
