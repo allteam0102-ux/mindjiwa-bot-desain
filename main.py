@@ -1656,8 +1656,10 @@ def local_parse_command(text):
          "soft_delta": 0.0, "head_bold": None, "new_photo": False,
          "slides": _slide_nums_in(text), "note": "", "action": "none"}
     notes = []
-    hit_judul = has("judul", "headline", "title", "tulisan besar")
-    hit_body  = has("body", "isi", "caption", "deskripsi", "paragraf", "teks kecil")
+    hit_judul = has("judul", "headline", "title", "tulisan besar",
+                    "atas", "yang atas", "teks atas", "bagian atas", "tulisan atas")
+    hit_body  = has("body", "isi", "caption", "deskripsi", "paragraf", "teks kecil",
+                    "bawah", "yang bawah", "teks bawah", "bagian bawah", "tulisan bawah")
     both = (not hit_judul and not hit_body)
     if has("kegedean", "kegede", "kebesaran", "gede banget", "terlalu besar", "terlalu gede", "kecilin", "perkecil", "kecilkan"):
         if hit_judul or both: d["head_scale_delta"] -= 0.12
@@ -1668,6 +1670,11 @@ def local_parse_command(text):
         if hit_judul or both: d["head_scale_delta"] += 0.12
         if hit_body  or both: d["body_scale_delta"] += 0.10
         notes.append("teks digedein")
+    # "samain / ukuran sama" -> dekatkan: judul diturunin, body dinaikin (ulang biar makin dekat)
+    if has("samain", "ukuran sama", "ukurannya sama", "sama besar", "sama gede", "seragam", "disamain", "biar sama", "samakan"):
+        d["head_scale_delta"] -= 0.10
+        d["body_scale_delta"] += 0.10
+        notes.append("ukuran judul & body didekatin")
     if has("susah kebaca", "susah dibaca", "ga kebaca", "nggak kebaca", "gak kebaca", "kurang jelas",
            "nggak jelas", "overlay kurang gelap", "kurang gelap", "lebih gelap", "pergelap"):
         d["scrim_delta"] += 0.15; notes.append("overlay dipergelap")
