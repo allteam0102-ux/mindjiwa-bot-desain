@@ -541,6 +541,38 @@ def record_photos_used(mem, ids):
         if pid:
             hist[str(pid)] = now
 
+def _unsplash_candidates(query):
+    """Daftar kandidat foto Unsplash (search) tanpa download. [] kalau gagal/kosong."""
+    r = requests.get("https://api.unsplash.com/search/photos",
+                     headers={"Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"},
+                     params={"query": _short_q(query), "per_page": 15, "orientation": PEXELS_ORIENTATION}, timeout=60)
+    r.raise_for_status()
+    out = []
+    for p in r.json().get("results", []):
+        urls = p.get("urls", {})
+        u = urls.get("regular") or urls.get("full") or urls.get("raw")
+        if u and p.get("id"):
+            name = (p.get("user") or {}).get("name", "-")
+            out.append({"id": str(p["id"]), "url": u, "credit": f"Foto: {name} (Unsplash)"})
+    return out
+
+def _pexels_candidates(query):
+    """Daftar kandidat foto Pexels (search) tanpa download. [] kalau gagal/kosong."""
+    def _search(q):
+        r = requests.get("https://api.pexels.com/v1/search",
+                         headers={"Authorization": PEXELS_API_KEY},
+                         params={"query": q, "per_page": 15, "orientation": PEXELS_ORIENTATION}, timeout=60)
+        r.raise_for_status()
+        return r.json().get("photos", [])
+    photos = _search(_short_q(query)) or _search(_short_q(query, add_hint=False))
+    out = []
+    for p in photos:
+        src = p.get("src", {})
+        u = src.get("large2x") or src.get("large") or src.get("original")
+        if u and p.get("id"):
+            out.append({"id": str(p["id"]), "url": u, "credit": f'Foto: {p.get("photographer","-")} (Pexels)'})
+    return out
+
 def image_pick(query, used_ids):
     """Sumber PRIBADI (koleksi/like akun user) dulu, baru internet umum sebagai cadangan."""
     if UNSPLASH_COLLECTIONS and UNSPLASH_ACCESS_KEY:
@@ -563,17 +595,32 @@ def image_pick(query, used_ids):
             print("    ! sumber Pexels pribadi gagal:", e)
     if PERSONAL_IMAGES_ONLY and (UNSPLASH_COLLECTIONS or UNSPLASH_LIKES_USER or PEXELS_COLLECTIONS):
         return None, None
-    # CADANGAN: internet umum (perilaku lama)
-    sources = (["unsplash", "pexels"] if UNSPLASH_ACCESS_KEY else ["pexels"])
+    # UMUM: GABUNG kandidat Unsplash + Pexels jadi satu, baru pilih acak (nggak maksa Unsplash).
     queries = [query, "calm aesthetic minimal lifestyle", "soft natural light nature"]
     for q in queries:
-        for src in sources:
+        cands = []
+        if UNSPLASH_ACCESS_KEY:
             try:
-                data, credit = (unsplash_pick if src == "unsplash" else pexels_pick)(q, used_ids)
-                if data:
-                    return data, credit
+                cands += _unsplash_candidates(q)
             except Exception as e:
-                print(f"    ! {src} gagal ('{q}'): {e}")
+                print(f"    ! unsplash cari gagal ('{q}'): {e}")
+        if PEXELS_API_KEY:
+            try:
+                cands += _pexels_candidates(q)
+            except Exception as e:
+                print(f"    ! pexels cari gagal ('{q}'): {e}")
+        if not cands:
+            continue
+        fresh = [c for c in cands if str(c["id"]) not in used_ids] or cands
+        random.shuffle(fresh)            # Unsplash & Pexels tercampur -> peluang adil
+        for c in fresh[:12]:
+            try:
+                d = requests.get(c["url"], timeout=60).content
+                Image.open(io.BytesIO(d)).verify()
+                used_ids.add(str(c["id"]))
+                return d, c["credit"]
+            except Exception:
+                continue
     return None, None
 
 def make_placeholder():
@@ -1533,6 +1580,7 @@ def tg_download_file(file_path, out_path):
 DEFAULT_MEMORY = {
     "preferences": {"head_scale": 1.0, "body_scale": 1.0, "scrim": 1.0, "soft": 0.0, "head_bold": True},
     "photo_history": {},  # id_foto (str) -> unix_ts terakhir dipakai (anti pakai-ulang < 6 bulan)
+    "photo_style": {},    # kata_gaya -> hitungan (dari approve-foto) -> acuan cari foto berikutnya
     "pending": {},        # token -> {title, page_id, ts, revision}
     "resolved": [],       # token yang sudah dinilai (anti dobel)
     "awaiting_text": None,  # token yang menunggu alasan ketik
@@ -1931,6 +1979,29 @@ def vision_json(prompt, image_path):
             return res
     return None
 
+def photo_style_keywords(image_path):
+    """Baca 'vibe'/gaya foto yg di-approve -> kata kunci Inggris. [] kalau AI mati/penuh."""
+    if not (GEMINI_API_KEY or GROQ_API_KEY):
+        return []
+    prompt = ("Lihat FOTO ini. Sebutkan 3-5 kata kunci GAYA/VIBE visualnya dalam bahasa Inggris "
+              "(contoh: moody, warm tone, minimalist, natural light, silhouette, cinematic, soft, aesthetic, muted). "
+              "Fokus ke MOOD/pencahayaan/komposisi/warna, BUKAN objeknya. "
+              'Balas HANYA JSON: {"style": ["kata1","kata2",...]}')
+    d = vision_json(prompt, image_path)
+    try:
+        words = [str(w).strip().lower() for w in (d or {}).get("style", []) if str(w).strip()]
+    except Exception:
+        return []
+    return [w for w in words if 2 <= len(w) <= 24][:5]
+
+def style_hint(mem, topn=3):
+    """Gabungan kata gaya yg paling sering di-approve -> ditempel ke query pencarian foto."""
+    ps = (mem or {}).get("photo_style") or {}
+    if not ps:
+        return ""
+    top = sorted(ps.items(), key=lambda kv: -int(kv[1] or 0))[:topn]
+    return " ".join(w for w, c in top if int(c or 0) >= 1)
+
 def _gemini_vision_json(prompt, image_path):
     """Kirim gambar + pertanyaan ke Gemini (mode 'mata'/vision), minta jawaban JSON.
     Gambar dikecilin dulu (max 640px, JPEG) biar payload kecil & cepat."""
@@ -2222,6 +2293,34 @@ def process_feedback(mem):
                                    "status": "rejected", "reason": REASON_LABEL.get(code, code)})
                 changed.append(desc)
                 tg_answer_callback(cb_id, f"Paham. {desc}. Gw revisi ya.")
+        elif kind == "af":                   # APPROVE FOTO aja -> kunci foto + belajar gaya (konten TETAP pending)
+            pid_norm = (rec.get("page_id") or "").replace("-", "")
+            if pend.get("photo_ok"):
+                tg_answer_callback(cb_id, "Foto udah dicatat sebelumnya 👍")
+            else:
+                if pid_norm:
+                    dc = mem.setdefault("design_cache", {}).setdefault(pid_norm, {})
+                    dc["photo_locked"] = True
+                learned = []
+                try:
+                    cover = os.path.join(_page_cache_dir(rec.get("page_id") or ""), "slide_1.png")
+                    if os.path.exists(cover):
+                        words = photo_style_keywords(cover)
+                        if words:
+                            ps = mem.setdefault("photo_style", {})
+                            for w in words:
+                                ps[w] = int(ps.get(w, 0) or 0) + 1
+                            learned = words
+                except Exception as _e:
+                    print("    ! belajar gaya foto gagal:", _e)
+                if tok in mem.get("pending", {}):
+                    mem["pending"][tok]["photo_ok"] = True
+                mem["log"].append({"ts": int(time.time()), "title": rec["title"],
+                                   "status": "photo_ok", "reason": ", ".join(learned)})
+                if learned:
+                    tg_answer_callback(cb_id, "🖼️ Foto dikunci + gaya dicatat: " + ", ".join(learned[:3]))
+                else:
+                    tg_answer_callback(cb_id, "🖼️ Foto dikunci. (gaya belum kecatat — AI lagi penuh)")
         elif kind == "r":                    # kompat tombol lama (Reject 2-langkah) -> abaikan halus
             tg_answer_callback(cb_id, "Pakai tombol alasan di desain baru ya 🙏")
 
@@ -2309,15 +2408,18 @@ def process_page(page, workdir, mem=None, revision=None):
                 "new_photo": bool(revision.get("new_photo", False)),
                 "slides": [int(x) for x in (revision.get("slides") or [])],
                 "dir": _page_cache_dir(page_id),
+                "locked": bool(cached.get("photo_locked")),   # foto dikunci -> jangan ganti
             }
             tgt = rev_reuse["slides"] or "semua"
-            print(f"  [reuse] cache cocok (hash={content_hash}) foto_baru={rev_reuse['new_photo']} target={tgt}")
+            print(f"  [reuse] cache cocok (hash={content_hash}) foto_baru={rev_reuse['new_photo']} locked={rev_reuse['locked']} target={tgt}")
     cdir = _page_cache_dir(page_id) if (mem is not None and page_id) else None
     slide_cache = {}
 
     def _reuse_ok(i):
         if rev_reuse is None:
             return False
+        if rev_reuse.get("locked"):
+            return True                 # foto dikunci -> selalu pakai foto lama
         targeted = (not rev_reuse["slides"]) or (i in rev_reuse["slides"])
         return not (rev_reuse["new_photo"] and targeted)
 
@@ -2346,6 +2448,8 @@ def process_page(page, workdir, mem=None, revision=None):
                         pim = Image.open(io.BytesIO(fetch_image_bytes(purl))).convert("RGB")
                     else:
                         q = keyword_for(0, [], cap, "")
+                        _sh = style_hint(mem)
+                        if _sh: q = (q + " " + _sh).strip()
                         _before = set(used_ids)
                         data, credit = image_pick(q, used_ids)
                         if data and mem is not None:
@@ -2400,6 +2504,8 @@ def process_page(page, workdir, mem=None, revision=None):
                         q = ai_kws[i - 1].strip()          # kata kunci FOTO dari AI (Inggris)
                     else:
                         q = keyword_for(i - 1, keyword_blocks, headline, body)
+                    _sh = style_hint(mem)                 # bias ke selera foto yg di-approve
+                    if _sh: q = (q + " " + _sh).strip()
                     _before = set(used_ids)
                     data, credit = image_pick(q, used_ids)
                     if data and mem is not None:
@@ -2443,9 +2549,11 @@ def process_page(page, workdir, mem=None, revision=None):
 
     # catat metadata cache (buat cek kecocokan di revisi berikutnya)
     if mem is not None and page_id:
+        _prev = (mem.get("design_cache", {}) or {}).get(pid_norm, {})
         mem.setdefault("design_cache", {})[pid_norm] = {
             "hash": content_hash, "n": total, "title": title,
-            "slides": slide_cache, "ts": int(time.time())}
+            "slides": slide_cache, "ts": int(time.time()),
+            "photo_locked": bool(_prev.get("photo_locked"))}   # pertahankan status 'foto dikunci'
         mem["last_page"] = {"page_id": page_id, "title": title, "ts": int(time.time())}
 
     # --- CEK MANDIRI (AI vision) — CUKUP slide COVER biar hemat kuota gratis Gemini ---
@@ -2536,7 +2644,8 @@ def process_page(page, workdir, mem=None, revision=None):
         pid_cb = (page_id or "").replace("-", "")     # page_id ditaruh di tombol (anti-hilang)
         mem["pending"][token] = {"title": title, "page_id": page_id,
                                  "ts": int(time.time()), "revision": rev_n}
-        rows = [[("✅ Approve (oke!)", f"a:{token}:{pid_cb}")]]
+        rows = [[("✅ Approve semua (oke!)", f"a:{token}:{pid_cb}")],
+                [("🖼️ Foto aja udah pas", f"af:{token}:{pid_cb}")]]
         rr = []
         for label, code in REASON_BUTTONS:
             rr.append(("❌ " + label, f"rs:{token}:{code}:{pid_cb}"))
